@@ -85,6 +85,17 @@ struct SelectionHandler {
     Str toolbarSvgIcon;
 };
 
+// predefined text inserted as a free text annotation, shown in the
+// context menu under Free Text
+struct TextSnippet {
+    // name shown in context menu
+    Str name;
+    // text of the free text annotation it inserts; \n starts a new line
+    Str text;
+    // keyboard shortcut
+    Str key;
+};
+
 // list of additional external viewers for various file types. See [docs
 // for more
 // information](https://www.sumatrapdfreader.org/docs/Customize-external-viewers)
@@ -760,6 +771,10 @@ struct Annotations {
     // Windows user name is used; set it to (none) to leave the author out
     // entirely
     Str defaultAuthor;
+    // path of the image (e.g. a transparent .png) that Sign With Image
+    // stamps on the page. If not set, or the file is missing, a file
+    // picker is shown
+    Str signatureImage;
 };
 
 // reading bar (View menu): a horizontal band on the page to keep your
@@ -803,6 +818,9 @@ struct Settings {
     // selection is active. See [docs for more
     // information](https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)
     Vec<SelectionHandler*>* selectionHandlers;
+    // predefined text inserted as a free text annotation, shown in the
+    // context menu under Free Text
+    Vec<TextSnippet*>* textSnippets;
     // zoom levels which zooming steps through in addition to Fit Page and
     // Fit Width. The largest value is also the highest zoom that can be
     // set at all, so listing levels above 6400 (up to 1000000) is how you
@@ -1592,15 +1610,16 @@ static const FieldInfo gAnnotationsFields[] = {
     {offsetof(Annotations, fileAttachmentColor), SettingType::Color, (intptr_t)""},
     {offsetof(Annotations, textIconType), SettingType::String, (intptr_t)""},
     {offsetof(Annotations, defaultAuthor), SettingType::String, (intptr_t)""},
+    {offsetof(Annotations, signatureImage), SettingType::String, (intptr_t)""},
 };
 static const StructInfo gAnnotationsInfo = {
     sizeof(Annotations),
-    25,
+    26,
     gAnnotationsFields,
     "HighlightColor\0UnderlineColor\0SquigglyColor\0StrikeOutColor\0FreeTextColor\0FreeTextBackgroundColor\0FreeTextOpa"
     "city\0FreeTextSize\0FreeTextBorderWidth\0FreeTextAlignment\0PresetColors\0TextIconColor\0LineColor\0PolyLineColor"
     "\0SquareColor\0CircleColor\0PolygonColor\0InkColor\0InkColors\0InkBorderWidth\0StampColor\0CaretColor\0FileAttachm"
-    "entColor\0TextIconType\0DefaultAuthor",
+    "entColor\0TextIconType\0DefaultAuthor\0SignatureImage",
     "color of newly created highlight annotations. Use an #aarrggbb value to set default opacity (00 = transparent, FF "
     "= opaque); #rrggbb is fully opaque\0color of newly created underline annotations. #aarrggbb sets default opacity "
     "the same way as HighlightColor\0color of newly created squiggly underline annotations. #aarrggbb sets default "
@@ -1625,7 +1644,9 @@ static const StructInfo gAnnotationsInfo = {
     "set, the PDF engine's default (red) is used\0color of newly created file attachment annotations. If not set, the "
     "PDF engine's default (red) is used\0icon shown for text (sticky note) annotations: comment, help, insert, key, "
     "new paragraph, note or paragraph. If not set, note is used\0author recorded on newly created annotations. If not "
-    "set, the Windows user name is used; set it to (none) to leave the author out entirely",
+    "set, the Windows user name is used; set it to (none) to leave the author out entirely\0path of the image (e.g. a "
+    "transparent .png) that Sign With Image stamps on the page. If not set, or the file is missing, a file picker is "
+    "shown",
     false};
 
 static const FieldInfo gExternalViewerFields[] = {
@@ -1739,6 +1760,19 @@ static const StructInfo gSelectionHandlerInfo = {
     "ToolbarSize as their icon size\0if set, the handler also gets a button on the main toolbar with this "
     "label\0optional SVG icon for that main-toolbar button; if both ToolbarSvgIcon and ToolbarText are set, the icon "
     "is used",
+    false};
+
+static const FieldInfo gTextSnippetFields[] = {
+    {offsetof(TextSnippet, name), SettingType::String, 0},
+    {offsetof(TextSnippet, text), SettingType::String, 0},
+    {offsetof(TextSnippet, key), SettingType::String, 0},
+};
+static const StructInfo gTextSnippetInfo = {
+    sizeof(TextSnippet),
+    3,
+    gTextSnippetFields,
+    "Name\0Text\0Key",
+    "name shown in context menu\0text of the free text annotation it inserts; \\n starts a new line\0keyboard shortcut",
     false};
 
 static const FieldInfo gShortcutFields[] = {
@@ -2222,6 +2256,8 @@ static const FieldInfo gSettingsFields[] = {
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(Settings, selectionHandlers), SettingType::Array, (intptr_t)&gSelectionHandlerInfo},
     {(size_t)-1, SettingType::Comment, 0},
+    {offsetof(Settings, textSnippets), SettingType::Array, (intptr_t)&gTextSnippetInfo},
+    {(size_t)-1, SettingType::Comment, 0},
     {offsetof(Settings, shortcuts), SettingType::Array, (intptr_t)&gShortcutInfo},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(Settings, themes), SettingType::Array, (intptr_t)&gThemeInfo},
@@ -2250,7 +2286,7 @@ static const FieldInfo gSettingsFields[] = {
 };
 static const StructInfo gSettingsInfo = {
     sizeof(Settings),
-    159,
+    161,
     gSettingsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
@@ -2269,9 +2305,9 @@ static const StructInfo gSettingsInfo = {
     "le\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0HtmlUI"
     "\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AntiGravity\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang"
     "\0TranslateEngine\0\0Annotations\0\0ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0Selection"
-    "Handlers\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0"
-    "WindowState\0WindowPos\0SearchUIWindowPos\0HelpWindowPos\0FileStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateChe"
-    "ck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0\0",
+    "Handlers\0\0TextSnippets\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage"
+    "\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0HelpWindowPos\0FileStates\0SessionData\0ReopenOnce\0Ti"
+    "meOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view, page aspect. page aspect (3.7+): first open of a PDF, XPS, DjVu or PostScript file "
     "uses page 1 — taller than wide is continuous + fit width, wider than tall is single page + fit page; a remembered "
@@ -2402,7 +2438,8 @@ static const StructInfo gSettingsInfo = {
     "forward search results are shown (used from LaTeX editors)\0\0these override the default settings in the Print "
     "dialog\0\0options for fullscreen mode\0\0list of handlers for selected text, shown in context menu when text "
     "selection is active. See [docs for more "
-    "information](https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)\0\0custom keyboard "
+    "information](https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)\0\0predefined text "
+    "inserted as a free text annotation, shown in the context menu under Free Text\0\0custom keyboard "
     "shortcuts\0\0color themes\0\0saved groups of tabs\0\0actual resolution of the main screen in DPI, used to show "
     "documents at their physical size; if 0 or negative, the resolution reported by Windows is used\0\0You're not "
     "expected to change those manually\0a whitespace separated list of passwords to try when opening a password "

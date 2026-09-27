@@ -2301,6 +2301,8 @@ struct FreeTextInPlaceEdit {
     float scale = 1.f;
     // the annotation's text color, for the typed text and the box's border
     Color textCol = kColBlack;
+    // just created: starts empty, and is deleted if left empty
+    bool isNew = false;
 };
 
 // MuPDF stacks free text lines 1.2 * the font size apart and wraps at the
@@ -2416,6 +2418,7 @@ void EndFreeTextInPlaceEdit(bool accept) {
     WindowTab* tab = gInPlace.tab;
     Annotation* annot = gInPlace.annot;
     Rect editRect = ChildPosWithinParent(hwnd);
+    bool isNew = gInPlace.isNew;
     TempStr text{};
     if (accept) {
         text = str::DupTemp(HwndGetTextTemp(hwnd));
@@ -2432,6 +2435,13 @@ void EndFreeTextInPlaceEdit(bool accept) {
     bool winOk = win && IsMainWindowValidAndNotClosing(win);
     if (winOk) {
         HwndSetFocus(win->hwndCanvas);
+    }
+    // a new box that was cancelled or left empty would be invisible: remove it
+    bool leftEmpty = !accept || str::IsEmptyOrWhiteSpace(text);
+    if (isNew && leftEmpty && tab && AnnotationIsLive(annot)) {
+        DeleteAnnotationAndUpdateUI(tab, annot);
+        gInPlaceEnding = false;
+        return;
     }
     if (accept && AnnotationIsLive(annot)) {
         // the box may be enlarged and the text set: one undo step
@@ -2541,7 +2551,7 @@ static LRESULT CALLBACK WndProcFreeTextInPlaceEdit(HWND hwnd, UINT msg, WPARAM w
     return res;
 }
 
-bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot) {
+bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot, FreeTextEditStart start) {
     if (!win || !win->hwndCanvas || !AnnotationIsLive(annot)) {
         return false;
     }
@@ -2598,10 +2608,14 @@ bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot) {
     SetWindowFont(hwnd, font, TRUE);
     int pad = std::max(DpiScale(2), 1);
     SendMessageW(hwnd, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(pad, pad));
-    TempStr text = str::DupTemp(Contents(annot));
-    str::NormalizeNewlinesToLFInPlace(text);
-    text = str::LFToCRLFTemp(text);
-    HwndSetText(hwnd, text);
+    // a new box holds only placeholder text (it sized the box); don't make the user delete it
+    bool isNew = start == FreeTextEditStart::New;
+    if (!isNew) {
+        TempStr text = str::DupTemp(Contents(annot));
+        str::NormalizeNewlinesToLFInPlace(text);
+        text = str::LFToCRLFTemp(text);
+        HwndSetText(hwnd, text);
+    }
 
     gInPlaceDefProc = (WNDPROC)GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
     SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)WndProcFreeTextInPlaceEdit);
@@ -2618,6 +2632,7 @@ bool StartFreeTextInPlaceEdit(MainWindow* win, Annotation* annot) {
     gInPlace.borderWidth = borderWidth;
     gInPlace.fontPx = fontPx;
     gInPlace.scale = scale;
+    gInPlace.isNew = isNew;
     PdfColor pdfTextCol = DefaultAppearanceTextColor(annot);
     if (pdfTextCol != kColorUnset) {
         u8 r, g, b, a;

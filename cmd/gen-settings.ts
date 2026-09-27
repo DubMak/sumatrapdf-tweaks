@@ -745,6 +745,12 @@ const externalViewer: Field[] = [
   ).ver("3.7"),
 ];
 
+const textSnippet: Field[] = [
+  field("Name", Str, null, "name shown in context menu"),
+  field("Text", Str, null, "text of the free text annotation it inserts; \\n starts a new line"),
+  field("Key", Str, null, "keyboard shortcut"),
+];
+
 const selectionHandler: Field[] = [
   field(
     "URL",
@@ -947,6 +953,13 @@ const annotations: Field[] = [
     "author recorded on newly created annotations. If not set, the Windows user name is used; " +
       "set it to (none) to leave the author out entirely",
   ).ver("3.4"),
+  field(
+    "SignatureImage",
+    Str,
+    "",
+    "path of the image (e.g. a transparent .png) that Sign With Image stamps on the page. " +
+      "If not set, or the file is missing, a file picker is shown",
+  ),
 ];
 
 const favorite: Field[] = [
@@ -1896,6 +1909,12 @@ const globalPrefs: Field[] = [
     "SelectionHandlers",
     selectionHandler,
     "list of handlers for selected text, shown in context menu when text selection is active. See [docs for more information](https://www.sumatrapdfreader.org/docs/Customize-search-translation-services)",
+  ),
+  emptyLine(),
+  array(
+    "TextSnippets",
+    textSnippet,
+    "predefined text inserted as a free text annotation, shown in the context menu under Free Text",
   ),
   emptyLine(),
   array("Shortcuts", keyboardShortcut, "custom keyboard shortcuts"),

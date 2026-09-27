@@ -13746,6 +13746,34 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             lastCreatedAnnot = EngineMupdfCreateAnnotation(engine, pageNoUnderCursor, ptOnPage, &args);
         } break;
 
+        case CmdInsertTextSnippet: {
+            // a free text box with the TextSnippets text at the cursor, or at
+            // the context menu point (lp)
+            if (!win || !tab || !dm || !cmd) {
+                return 0;
+            }
+            EngineBase* engine = dm->GetEngine();
+            if (!engine || !EngineSupportsAnnotations(engine)) {
+                return 0;
+            }
+            Point pt = HwndGetCursorPos(win->hwndCanvas);
+            if (lp != 0) {
+                pt = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            }
+            int pageNo = dm->GetPageNoByPoint(pt);
+            if (pageNo < 0 && !SetPointToVisiblePage(dm, pt, pageNo)) {
+                return 0;
+            }
+            PointF ptOnPage = dm->CvtFromScreen(pt, pageNo);
+            AnnotCreateArgs args{AnnotationType::FreeText};
+            SetAnnotCreateArgs(args, cmd);
+            args.content = GetCommandStringArg(cmd, kCmdArgText, {});
+            SizeF sz = FreeTextPlacementPageSize(args);
+            args.hasRect = true;
+            args.rect = {ptOnPage.x, ptOnPage.y, sz.dx, sz.dy};
+            lastCreatedAnnot = EngineMupdfCreateAnnotation(engine, pageNo, ptOnPage, &args);
+        } break;
+
         case CmdCreateAnnotImageFromClipboard: {
             Pixmap* image = GetClipboardImageAsPixmap();
             if (!image) {
@@ -13760,6 +13788,7 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             FreePixmap(image);
         } break;
 
+        case CmdSignWithImage:
         case CmdInsertImage: {
             // File / document menu: pick a PNG (or other image) and stamp it on
             // the page — the Fill & Sign-style electronic signature (#1744).
@@ -13770,7 +13799,15 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
             if (!engine || !EngineSupportsAnnotations(engine)) {
                 return 0;
             }
-            TempStr path = PickImageFilePathTemp(win->hwndFrame);
+            // Sign With Image stamps Annotations.SignatureImage without asking
+            TempStr path{};
+            Str sigPath = gSettings->annotations.signatureImage;
+            if (cmdId == CmdSignWithImage && len(sigPath) > 0 && file::Exists(sigPath)) {
+                path = str::DupTemp(sigPath);
+            }
+            if (len(path) == 0) {
+                path = PickImageFilePathTemp(win->hwndFrame);
+            }
             if (len(path) == 0) {
                 return 0;
             }
@@ -13823,7 +13860,8 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
     // (Shift+A / Shift+U). Paste and insert-image still enter the mode.
     bool enterEditPdf = true;
     if (cmdId >= CmdCreateAnnotFirst && cmdId <= CmdCreateAnnotLast) {
-        enterEditPdf = openEdit;
+        // free text is edited right away: always show its format toolbar
+        enterEditPdf = openEdit || cmdId == CmdCreateAnnotFreeText;
     }
     if (enterEditPdf) {
         EnablePdfAnnotationsToolbar(win);
@@ -13848,7 +13886,7 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
     // in it rather than make the user find it again. Not for a paste, which
     // brings the text it was copied from.
     if (cmdId == CmdCreateAnnotFreeText && lastCreatedAnnot->type == AnnotationType::FreeText) {
-        StartFreeTextInPlaceEdit(win, lastCreatedAnnot);
+        StartFreeTextInPlaceEdit(win, lastCreatedAnnot, FreeTextEditStart::New);
     } else if (openEdit) {
         // in fullscreen too: Contents used to never open there (issue #6111)
         uitask::Post(MkFunc0(StartSelectedAnnotContentsEdit, win), "StartAnnotContentsEdit");

@@ -95,8 +95,8 @@ static Str FreeTextPlacementContent(const AnnotCreateArgs& args) {
     return args.content;
 }
 
-// Size, in page units, of a box that fits one line of the annotation's text.
-static SizeF FreeTextPlacementPageSize(const AnnotCreateArgs& args) {
+// Size, in page units, of a box that fits the annotation's text.
+SizeF FreeTextPlacementPageSize(const AnnotCreateArgs& args) {
     float fontSize = (float)FreeTextFontSize(args);
     float pad = FreeTextPadding(args);
     float dx = 0;
@@ -113,7 +113,12 @@ static SizeF FreeTextPlacementPageSize(const AnnotCreateArgs& args) {
     }
     ReleaseDC(nullptr, hdc);
     dx = (dx * kFreeTextWidthSlack) + (2 * pad) + 2.f;
-    float dy = (kFreeTextLineHeight * fontSize) + (2 * pad);
+    Str content = FreeTextPlacementContent(args);
+    int nLines = 1;
+    for (int i = 0; i < content.len; i++) {
+        nLines += content.s[i] == '\n' ? 1 : 0;
+    }
+    float dy = (nLines * kFreeTextLineHeight * fontSize) + (2 * pad);
     return {dx, dy};
 }
 

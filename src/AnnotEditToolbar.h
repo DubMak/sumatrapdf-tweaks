@@ -19,7 +19,11 @@ void RefreshAnnotEditToolbar(MainWindow*);
 void DeleteAnnotEditToolbar(MainWindow*);
 TempStr AnnotEditToolbarStateTemp(MainWindow*);
 
-bool StartFreeTextInPlaceEdit(MainWindow*, Annotation*);
+enum class FreeTextEditStart {
+    Existing,
+    New
+};
+bool StartFreeTextInPlaceEdit(MainWindow*, Annotation*, FreeTextEditStart = FreeTextEditStart::Existing);
 bool StartFreeTextInPlaceEditAt(MainWindow*, Point);
 bool IsEditingFreeTextInPlace(MainWindow*);
 bool AnnotContentsEditJustEnded();

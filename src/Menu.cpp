@@ -1271,6 +1271,19 @@ static MenuDef menuDefDocumentOperations[] = {
 
 //[ ACCESSKEY_GROUP Context Menu (Main)
 static MenuDef menuDefContext[] = {
+    // quick access, avoids digging through Annotations / Document submenus
+    {
+        TrN("Free &Text"),
+        CmdCreateAnnotFreeText,
+    },
+    {
+        TrN("Si&gn With Image"),
+        CmdSignWithImage,
+    },
+    {
+        StrL(kMenuSeparator),
+        kMenuSeparatorID,
+    },
     {
         TrN("S&election"),
         (UINT_PTR)menuDefSelection,
@@ -1537,6 +1550,18 @@ static void AppendSelectionHandlersToMenu(HMENU m, bool isEnabled) {
     AppendCommandsToMenu(m, cmds, isEnabled);
 }
 
+static void AppendTextSnippetsToMenu(HMENU m) {
+    Vec<CustomCommand*> cmds;
+    GetCommandsWithOrigId(cmds, CmdInsertTextSnippet);
+    if (len(cmds) < 2) {
+        AppendCommandsToMenu(m, cmds, true);
+        return;
+    }
+    HMENU sub = CreatePopupMenu();
+    AppendCommandsToMenu(sub, cmds, true);
+    AppendMenuW(m, MF_POPUP | MF_ENABLED, (UINT_PTR)sub, ToWStrTemp(Tr("Insert Te&xt")).s);
+}
+
 static void AppendExternalViewersToMenu(HMENU menuFile, Str filePath) {
     if (!CanAccessDisk() || (filePath && !file::Exists(filePath))) {
         return;
@@ -1750,6 +1775,10 @@ HMENU BuildMenuFromDef(MenuDef* menuDef, HMENU menu, BuildMenuCtx* ctx) {
         removeMenu |= ((subMenuDef == menuDefDebug) && !ShowDebugMenu());
         if (removeMenu) {
             continue;
+        }
+        // TextSnippets go right after Free Text
+        if (menuDef == menuDefContext && cmdId == CmdSignWithImage) {
+            AppendTextSnippetsToMenu(menu);
         }
 
         bool noTranslate = isDebugMenu || cmdIdInList(menusNoTranslate);
@@ -2163,7 +2192,7 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
     HMENU popup = BuildMenuFromDef(menuDefContextStart, CreatePopupMenu(), &ctx);
     MenuSetChecked(popup, CmdPinSelectedDocument, fs->isPinned);
     // Del is home-page-only (not a global accelerator), so AppendAccelKey won't
-    // pick it up — show it next to Remove From History explicitly
+    // pick it up â€” show it next to Remove From History explicitly
     MenuSetText(popup, CmdForgetSelectedDocument, str::JoinTemp(Tr("&Remove From History"), StrL("\tDel")));
     Point pt = HwndMapWindowPoint(win->hwndCanvas, HWND_DESKTOP, {x, y});
     // keyboard menu (no hit under the cursor): place at cursor or near the frame
@@ -2236,7 +2265,7 @@ void OnAboutContextMenu(MainWindow* win, int x, int y) {
 
 // removes a file from the Frequently Read list on the home page. Files with
 // favorites are only hidden (so the favorites aren't lost). Used by both the
-// context menu and the per-thumbnail ✕ button (issue #283).
+// context menu and the per-thumbnail âœ• button (issue #283).
 void ForgetFileFromFrequentlyRead(MainWindow* win, Str filePath) {
     FileState* fs = FileHistoryFindByPath(filePath);
     if (!fs) {
@@ -2464,6 +2493,10 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
         HwndSendCommand(win->hwndFrame, cmd->id);
         return;
     }
+    if (cmd && cmd->origId == CmdInsertTextSnippet) {
+        HwndSendCommand(win->hwndFrame, cmd->id, MAKELPARAM(x, y));
+        return;
+    }
 
     // handle in FrameOnCommand() in SumatraPDF.cpp
     if (CommandUsesContextMenuPoint(cmdId)) {
@@ -2616,7 +2649,8 @@ bool CommandUsesContextMenuPoint(int cmdId) {
         return true;
     }
     return cmdId == CmdDeleteAnnotation || cmdId == CmdCreateAnnotImageFromClipboard || cmdId == CmdInsertImage ||
-           cmdId == CmdPasteAnnotation || cmdId == CmdCopyAnnotation || cmdId == CmdCutAnnotation;
+           cmdId == CmdSignWithImage || cmdId == CmdPasteAnnotation || cmdId == CmdCopyAnnotation ||
+           cmdId == CmdCutAnnotation;
 }
 
 // so that we can do free everything at exit
