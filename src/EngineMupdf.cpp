@@ -9857,8 +9857,8 @@ bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
 }
 
 // Insert every page of the PDF at path in front of the page now at toSlot
-// (pageCount + 1 appends). One undo step. Annotations of the inserted pages
-// aren't copied. Returns the number of pages inserted, 0 on failure.
+// (pageCount + 1 appends). One undo step. Annotations and form fields of the
+// inserted pages are flattened into their content. Returns the number of pages inserted, 0 on failure.
 int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot) {
     EngineMupdf* e = AsEngineMupdf(engine);
     if (!EngineMupdfCanEditPages(engine)) {
@@ -9887,6 +9887,9 @@ int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot) {
             if (pdf_needs_password(ctx, srcDoc)) {
                 fz_throw(ctx, FZ_ERROR_ARGUMENT, "password protected");
             }
+            // grafting only copies page content: bake annotations and form
+            // fields into it first (in memory, the file isn't touched)
+            pdf_bake_document(ctx, srcDoc, 1, 1);
             int n = pdf_count_pages(ctx, srcDoc);
             map = pdf_new_graft_map(ctx, doc);
             pdf_begin_operation(ctx, doc, "Insert pages");

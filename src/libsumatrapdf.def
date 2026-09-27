@@ -299,6 +299,7 @@ EXPORTS
 	pdf_graft_mapped_object
 
 	pdf_graft_mapped_page
+	pdf_bake_document
 
 	pdf_add_object
 
