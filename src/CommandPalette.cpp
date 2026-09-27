@@ -284,6 +284,10 @@ constexpr int kPaletteThumbnailPadding = 16;
 constexpr int kPaletteThumbnailMaxCols = 6;
 constexpr int kPaletteThumbnailRenderScreens = 1;
 constexpr int kPaletteThumbnailKeepScreens = 2;
+constexpr int kSidebarThumbnailGap = 10;
+constexpr int kSidebarThumbnailPadding = 8;
+constexpr int kSidebarThumbnailMinDx = 48;
+constexpr int kSidebarThumbnailMaxDx = 240;
 
 static Pixmap* const kThumbnailRenderFailed = (Pixmap*)(intptr_t)-1;
 
@@ -338,8 +342,13 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     int gap = 0;
     int rowGap = 0;
     bool active = false;
+    // shown in the left sidebar instead of the palette: a click goes to the
+    // page, hovering doesn't select and the thumbnails fit the sidebar width
+    bool sidebarMode = false;
+    // what the thumbnails were made for; a change means ResetForCurrentTab()
+    DisplayModel* madeForDm = nullptr;
 
-    ThumbnailPaletteCtrl(MainWindow*, PlatformFont*, int dpi);
+    ThumbnailPaletteCtrl(MainWindow*, PlatformFont*, int dpi, bool sidebarMode = false);
     ~ThumbnailPaletteCtrl() override;
 
     void SetBounds(Rect) override;
@@ -354,8 +363,14 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void HandleKey(int vkey);
     void StartRendering();
     int RenderedCount() const;
+    bool NeedsReset();
+    void ResetForCurrentTab();
+    void SetCurrentPage(int pageNo);
 
   private:
+    void InitForCurrentTab();
+    void FreeCache();
+    void SetThumbSize(int dx);
     int PageAtPoint(Point);
     void SelectPage(int);
     void OpenSelectedPage();
@@ -415,6 +430,13 @@ static void FinishThumbnailRender(ThumbnailRenderTask* task) {
     ThumbnailPaletteCache* cache = task->cache;
     int idx = task->pageNo - 1;
     bool isValid = !cache->deleteWhenWorkerFinishes && idx >= 0 && idx < len(cache->thumbnails);
+    // rendered for a sidebar width that has changed since: drop it, it gets
+    // re-rendered at the new size
+    if (isValid && task->bitmap && std::abs(task->bitmap->width - cache->thumbDx) > 2) {
+        FreePixmap(task->bitmap);
+        task->bitmap = nullptr;
+        isValid = false;
+    }
     if (isValid) {
         if (task->bitmap) {
             FreeThumbnail(cache->thumbnails[idx]);
@@ -475,36 +497,26 @@ static void RenderThumbnailsInBackground(ThumbnailRenderWorker* worker) {
     delete worker;
 }
 
-ThumbnailPaletteCtrl::ThumbnailPaletteCtrl(MainWindow* win, PlatformFont* font, int dpi) {
+ThumbnailPaletteCtrl::ThumbnailPaletteCtrl(MainWindow* win, PlatformFont* font, int dpi, bool sidebarMode) {
     this->win = win;
-    this->tab = win->CurrentTab();
     this->font = font;
     this->dpi = dpi;
+    this->sidebarMode = sidebarMode;
+    smoothScroll = sidebarMode;
     SetFlag(vwfFocusable, false);
     SetColor(kColListText, ThemeWindowTextColor());
     SetColor(kColListBg, ThemeWindowControlBackgroundColor());
 
     thumbDx = DpiScaleByDpi(dpi, kPaletteThumbnailDx);
     thumbDy = DpiScaleByDpi(dpi, kPaletteThumbnailDy);
-    gap = DpiScaleByDpi(dpi, kPaletteThumbnailGap);
+    int pad = sidebarMode ? kSidebarThumbnailPadding : kPaletteThumbnailPadding;
+    gap = DpiScaleByDpi(dpi, sidebarMode ? kSidebarThumbnailGap : kPaletteThumbnailGap);
     rowGap = gap;
     itemDy = thumbDy + gap;
-    padding = DpiScaledInsets(kPaletteThumbnailPadding, kPaletteThumbnailPadding);
-
-    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
-    pageCount = dm ? dm->PageCount() : 0;
-    selectedPage = dm ? Clamp(dm->CurrentPageNo(), 1, std::max(pageCount, 1)) : 1;
+    padding = DpiScaledInsets(pad, pad);
 
     rowsModel = new ThumbnailRowsModel();
-    rowsModel->rows = pageCount;
-    SetModel(rowsModel);
-
-    cache = new ThumbnailPaletteCache();
-    cache->ctrl = this;
-    cache->rotation = dm ? dm->GetRotation() : 0;
-    cache->thumbDx = thumbDx;
-    cache->thumbDy = thumbDy;
-    VecAppendBlanks(cache->thumbnails, pageCount);
+    InitForCurrentTab();
 
     onDrawItem = MkMethod1<ThumbnailPaletteCtrl, DrawItemEvent*, &ThumbnailPaletteCtrl::DrawRow>(this);
     VirtCtrl::onMouseDown =
@@ -516,6 +528,94 @@ ThumbnailPaletteCtrl::ThumbnailPaletteCtrl(MainWindow* win, PlatformFont* font, 
         MkMethod1<ThumbnailPaletteCtrl, VirtMouseEvent*, &ThumbnailPaletteCtrl::OnThumbMouseWheel>(this);
     VirtCtrl::onDoubleClick =
         MkMethod1<ThumbnailPaletteCtrl, VirtMouseEvent*, &ThumbnailPaletteCtrl::OnThumbDoubleClick>(this);
+}
+
+void ThumbnailPaletteCtrl::InitForCurrentTab() {
+    tab = win->CurrentTab();
+    madeForDm = tab ? tab->AsFixed() : nullptr;
+    pageCount = madeForDm ? madeForDm->PageCount() : 0;
+    selectedPage = madeForDm ? Clamp(madeForDm->CurrentPageNo(), 1, std::max(pageCount, 1)) : 1;
+
+    rowsModel->rows = (pageCount + cols - 1) / cols;
+    SetModel(rowsModel);
+
+    cache = new ThumbnailPaletteCache();
+    cache->ctrl = this;
+    cache->rotation = madeForDm ? madeForDm->GetRotation() : 0;
+    cache->thumbDx = thumbDx;
+    cache->thumbDy = thumbDy;
+    VecAppendBlanks(cache->thumbnails, pageCount);
+}
+
+void ThumbnailPaletteCtrl::FreeCache() {
+    cache->ctrl = nullptr;
+    AtomicIntSet(&cache->cancelRendering, 1);
+    if (cache->workerRunning) {
+        cache->deleteWhenWorkerFinishes = true;
+    } else {
+        DeleteThumbnailCache(cache);
+    }
+    cache = nullptr;
+}
+
+// the document in the current tab isn't the one the thumbnails were made for
+// (tab switch, reload, a different number of pages or rotation)
+bool ThumbnailPaletteCtrl::NeedsReset() {
+    WindowTab* curr = win->CurrentTab();
+    DisplayModel* currDm = curr ? curr->AsFixed() : nullptr;
+    if (curr != tab || currDm != madeForDm) {
+        return true;
+    }
+    if (!madeForDm) {
+        return false;
+    }
+    return madeForDm->PageCount() != pageCount || madeForDm->GetRotation() != cache->rotation;
+}
+
+void ThumbnailPaletteCtrl::ResetForCurrentTab() {
+    FreeCache();
+    scrollY = 0;
+    InitForCurrentTab();
+    if (!lastBounds.IsEmpty()) {
+        EnsureVisible((selectedPage - 1) / cols);
+    }
+    Invalidate();
+    if (active) {
+        StartRendering();
+    }
+}
+
+// follow the page shown in the document without navigating
+void ThumbnailPaletteCtrl::SetCurrentPage(int pageNo) {
+    if (pageCount <= 0) {
+        return;
+    }
+    pageNo = Clamp(pageNo, 1, pageCount);
+    if (pageNo == selectedPage) {
+        return;
+    }
+    selectedPage = pageNo;
+    EnsureVisible((selectedPage - 1) / cols);
+    Invalidate();
+    StartRendering();
+}
+
+// sidebar thumbnails fill the sidebar width; rounded so dragging the splitter
+// doesn't re-render them on every pixel
+void ThumbnailPaletteCtrl::SetThumbSize(int dx) {
+    int step = DpiScaleByDpi(dpi, 16);
+    dx = std::max(step, (dx / step) * step);
+    if (dx == thumbDx) {
+        return;
+    }
+    thumbDx = dx;
+    thumbDy = (dx * kPaletteThumbnailDy) / kPaletteThumbnailDx;
+    cache->thumbDx = thumbDx;
+    cache->thumbDy = thumbDy;
+    for (int i = 0; i < len(cache->thumbnails); i++) {
+        FreeThumbnail(cache->thumbnails[i]);
+        cache->thumbnails[i] = nullptr;
+    }
 }
 
 ThumbnailPaletteCtrl::~ThumbnailPaletteCtrl() {
@@ -532,6 +632,11 @@ ThumbnailPaletteCtrl::~ThumbnailPaletteCtrl() {
 void ThumbnailPaletteCtrl::SetBounds(Rect r) {
     int reservedScrollbarDx = DpiScaleByDpi(dpi, 10);
     int availableDx = r.dx - padding.left - padding.right - reservedScrollbarDx;
+    if (sidebarMode) {
+        int minDx = DpiScaleByDpi(dpi, kSidebarThumbnailMinDx);
+        int maxDx = DpiScaleByDpi(dpi, kSidebarThumbnailMaxDx);
+        SetThumbSize(Clamp(availableDx, minDx, maxDx));
+    }
     int newCols = (availableDx + gap) / (thumbDx + gap);
     newCols = Clamp(newCols, 1, kPaletteThumbnailMaxCols);
     if (newCols != cols) {
@@ -542,7 +647,7 @@ void ThumbnailPaletteCtrl::SetBounds(Rect r) {
 
     int visibleRows = std::max(1, (r.dy - gap) / (thumbDy + gap));
     visibleRows = std::min(visibleRows, rowsModel->rows);
-    if (visibleRows > 0) {
+    if (visibleRows > 0 && !sidebarMode) {
         int freeDy = r.dy - (visibleRows * thumbDy);
         rowGap = std::max(gap, freeDy / (visibleRows + 1));
     }
@@ -562,7 +667,7 @@ void ThumbnailPaletteCtrl::DrawRow(DrawItemEvent* ev) {
     int left = ev->itemRect.x + std::max(0, (ev->itemRect.dx - gridDx) / 2);
     int firstPage = (ev->itemIndex * cols) + 1;
     int lastPage = std::min(pageCount, firstPage + cols - 1);
-    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    DisplayModel* dm = (tab && win->CurrentTab() == tab) ? tab->AsFixed() : nullptr;
     EngineBase* engine = dm ? dm->GetEngine() : nullptr;
     bool chapters = ShowChapterUi(dm);
     for (int pageNo = firstPage; pageNo <= lastPage; pageNo++) {
@@ -581,6 +686,9 @@ void ThumbnailPaletteCtrl::DrawRow(DrawItemEvent* ev) {
 
         if (pageNo == selectedPage) {
             ev->gfx->DrawRect(pageRect, MkRgb(0, 120, 215), 3);
+        } else {
+            // soft outline so white pages stand out from the background
+            ev->gfx->DrawRect(pageRect, MkRgb(200, 200, 200), 1);
         }
 
         TempStr label = fmt("%d", pageNo);
@@ -621,7 +729,9 @@ int ThumbnailPaletteCtrl::PageAtPoint(Point pt) {
     rowRect.Offset(-origin.x, -origin.y);
     int gridDx = (cols * thumbDx) + ((cols - 1) * gap);
     int left = rowRect.x + std::max(0, (rowRect.dx - gridDx) / 2);
-    if (pt.x < left || pt.y < rowRect.y || pt.y >= rowRect.y + thumbDy) {
+    // the sidebar also takes clicks on the page label below the thumbnail
+    int hitDy = sidebarMode ? rowRect.dy : thumbDy;
+    if (pt.x < left || pt.y < rowRect.y || pt.y >= rowRect.y + hitDy) {
         return -1;
     }
     int col = (pt.x - left) / (thumbDx + gap);
@@ -641,11 +751,15 @@ void ThumbnailPaletteCtrl::SelectPage(int pageNo) {
         return;
     }
     pageNo = Clamp(pageNo, 1, pageCount);
+    int oldScrollY = scrollY;
+    EnsureVisible((pageNo - 1) / cols);
     if (pageNo == selectedPage) {
+        if (scrollY != oldScrollY) {
+            StartRendering();
+        }
         return;
     }
     selectedPage = pageNo;
-    EnsureVisible((selectedPage - 1) / cols);
     Invalidate();
     StartRendering();
 }
@@ -659,13 +773,18 @@ void ThumbnailPaletteCtrl::OpenSelectedPage() {
         return;
     }
     dm->GoToPage(selectedPage, 0, true);
-    ScheduleDeleteAndExecCommand();
+    if (!sidebarMode) {
+        ScheduleDeleteAndExecCommand();
+    }
 }
 
 void ThumbnailPaletteCtrl::OnThumbMouseDown(VirtMouseEvent* ev) {
     int pageNo = PageAtPoint(ev->pt);
     if (pageNo > 0) {
         SelectPage(pageNo);
+        if (sidebarMode) {
+            OpenSelectedPage();
+        }
         ev->didHandle = true;
         return;
     }
@@ -682,7 +801,7 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
     if (scrollY != oldScrollY) {
         StartRendering();
     }
-    if (ev->didHandle) {
+    if (ev->didHandle || sidebarMode) {
         return;
     }
     int pageNo = PageAtPoint(ev->pt);
@@ -790,7 +909,7 @@ void ThumbnailPaletteCtrl::StartRendering() {
     if (!active || cache->workerRunning || pageCount <= 0) {
         return;
     }
-    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    DisplayModel* dm = (tab && win->CurrentTab() == tab) ? tab->AsFixed() : nullptr;
     if (!dm || win->CurrentTab() != tab || dm->PageCount() != pageCount || dm->GetRotation() != cache->rotation) {
         return;
     }
@@ -3032,4 +3151,33 @@ void CommandPaletteWnd::QueryChanged() {
         return;
     }
     CommandPaletteSetCurrentSelection(this, 0);
+}
+
+//--- page thumbnails in the left sidebar (the same control as the palette's)
+
+VirtListBox* NewSidebarThumbnails(MainWindow* win, PlatformFont* font, int dpi) {
+    return new ThumbnailPaletteCtrl(win, font, dpi, true);
+}
+
+// re-target the thumbnails to the current tab if needed and highlight pageNo
+// (<= 0: the document's current page)
+void SidebarThumbnailsUpdate(VirtListBox* lb, bool active, int pageNo) {
+    auto* ctrl = (ThumbnailPaletteCtrl*)lb;
+    if (!ctrl) {
+        return;
+    }
+    if (!active) {
+        ctrl->Deactivate();
+        return;
+    }
+    if (ctrl->NeedsReset()) {
+        ctrl->ResetForCurrentTab();
+    }
+    ctrl->Activate();
+    if (pageNo <= 0 && ctrl->madeForDm) {
+        pageNo = ctrl->madeForDm->CurrentPageNo();
+    }
+    if (pageNo > 0) {
+        ctrl->SetCurrentPage(pageNo);
+    }
 }

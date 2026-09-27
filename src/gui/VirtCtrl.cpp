@@ -1585,6 +1585,9 @@ int VirtListBox::ViewportDy() {
 // the list reads as a rendering glitch, so the strip below the last whole row
 // is left empty and never scrolled into
 int VirtListBox::UsableDy() {
+    if (smoothScroll) {
+        return ViewportDy();
+    }
     int dy = GetItemHeight();
     int usable = (ViewportDy() / dy) * dy;
     return usable > 0 ? usable : ViewportDy();
@@ -1928,8 +1931,11 @@ Rect VirtListBox::ItemRect(int idx) {
     content.dy = UsableDy();
     int dy = GetItemHeight();
     Rect r = {content.x, content.y + (idx * dy) - scrollY, content.dx - ScrollbarDx(), dy};
-    if (r.y < content.y || r.Bottom() > content.Bottom()) {
-        return {}; // not (fully) visible
+    // smoothScroll shows partly visible rows, so they count as visible
+    bool visible = smoothScroll ? (r.Bottom() > content.y && r.y < content.Bottom())
+                                : (r.y >= content.y && r.Bottom() <= content.Bottom());
+    if (!visible) {
+        return {};
     }
     return r;
 }
@@ -2074,12 +2080,16 @@ void VirtListBox::OnCaptureLost() {
     draggingThumb = false;
 }
 
+// wheel scroll per line with smoothScroll; 3 lines per notch
+constexpr int kSmoothScrollLineDy = 40;
+
 void VirtListBox::OnMouseWheel(VirtMouseEvent* ev) {
     if (ev->wheelDelta == 0) {
         return;
     }
     int lines = -(ev->wheelDelta * 3) / WHEEL_DELTA;
-    if (ScrollBy(lines * GetItemHeight())) {
+    int lineDy = smoothScroll ? DpiScaleByDpi(GetDpi(), kSmoothScrollLineDy) : GetItemHeight();
+    if (ScrollBy(lines * lineDy)) {
         ev->didHandle = true;
     }
 }

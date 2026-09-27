@@ -18,3 +18,8 @@ HWND CommandPaletteHwndForAccelerator(HWND hwnd);
 TempStr CommandPaletteStateTemp(int* exitCodeOut);
 void CommandPaletteOnAnnotationsChanged();
 void CommandPaletteUpdateTheme();
+
+struct VirtListBox;
+struct PlatformFont;
+VirtListBox* NewSidebarThumbnails(MainWindow*, PlatformFont*, int dpi);
+void SidebarThumbnailsUpdate(VirtListBox*, bool active, int pageNo = 0);

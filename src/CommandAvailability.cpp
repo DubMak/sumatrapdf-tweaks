@@ -904,7 +904,8 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
         return onImage ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if ((cmdId == CmdToggleBookmarks) || (cmdId == CmdToggleTableOfContents)) {
-        return ctx.hasToc ? CommandVisibility::Show : CommandVisibility::Hide;
+        // no bookmarks still leaves the page thumbnails
+        return (ctx.hasToc || ctx.isFixedPage) ? CommandVisibility::Show : CommandVisibility::Hide;
     }
 
     // No extractable text on comics, image folders, or single images.

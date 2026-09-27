@@ -1130,6 +1130,9 @@ struct Settings {
     // if true, show the table of contents (Bookmarks) sidebar when the
     // document has one
     bool showToc;
+    // if true, every opened document shows the bookmarks / pages sidebar,
+    // even one last closed with it hidden
+    bool alwaysShowSidebar;
     // if true, put the bookmarks / favorites sidebar on the right of the
     // window (left is the default; right-to-left UI languages already put
     // it on the right)
@@ -2158,6 +2161,7 @@ static const FieldInfo gSettingsFields[] = {
     {offsetof(Settings, showFavorites), SettingType::Bool, false},
     {offsetof(Settings, sortFavoritesByName), SettingType::Bool, false},
     {offsetof(Settings, showToc), SettingType::Bool, true},
+    {offsetof(Settings, alwaysShowSidebar), SettingType::Bool, false},
     {offsetof(Settings, sidebarOnRight), SettingType::Bool, false},
     {offsetof(Settings, sidebarWindowSize), SettingType::String, (intptr_t)""},
     {offsetof(Settings, showLinks), SettingType::Bool, false},
@@ -2286,28 +2290,28 @@ static const FieldInfo gSettingsFields[] = {
 };
 static const StructInfo gSettingsInfo = {
     sizeof(Settings),
-    161,
+    162,
     gSettingsFields,
     "\0\0DefaultDisplayMode\0DefaultZoom\0DisableJavaScript\0AllowExternalImages\0EnableTeXEnhancements\0EscToExit\0Ful"
     "lPathInTitle\0InverseSearchCmdLine\0LazyLoading\0MainWindowBackground\0NoHomeTab\0HomePageSortByFrequentlyRead\0Ho"
     "mePageViewMode\0FilePicker\0PrinterUI\0ReloadModifiedDocuments\0RememberOpenedFiles\0RememberStatePerDocument\0Res"
     "toreSession\0ReuseInstance\0ShowMenubar\0ShowMenubarWithTabs\0ShowPageNumberInTabs\0ShowHomePageReadingProgress\0S"
     "howChaptersInEbooks\0ShowTips\0CustomColors\0ShowToolbar\0Toolbar\0ToolbarPosition\0SearchUIFloating\0ShowFavorite"
-    "s\0SortFavoritesByName\0ShowToc\0SidebarOnRight\0SidebarWindowSize\0ShowLinks\0HighlightFormFields\0ClickEdgeToTur"
-    "nPage\0DisableLinks\0ExplorerQuickLook\0RememberViewOffsetOnPageTurn\0MouseWheelTurnsPage\0ScrollEdgeTurnsPage\0Sh"
-    "owDocumentFocusIndicator\0ShowAnnotationNotification\0ShowFileNavigateHint\0ShowAnnotationAuthorInTooltip\0ShowToc"
-    "PageNumbers\0AutoGenerateTOC\0ShowStartPage\0SidebarDx\0Scrollbars\0ScrollbarInSinglePage\0SmoothScroll\0ScrollLin"
-    "eAmount\0SaveMemory\0PaddingAfterLastPage\0IgnoreDestinationZoom\0HighlightLinkDestination\0CitationHoverDelay\0Re"
-    "adAloudVoiceId\0ReadAloudSpeed\0ReadingAutoScrollSpeed\0ReadingBar\0FastScrollOverScrollbar\0PreventSleepInFullscr"
-    "een\0TabWidth\0Theme\0HelpTheme\0LastLightTheme\0LastDarkTheme\0DocumentColorsFollowTheme\0TocDy\0ToolbarCustomLay"
-    "out\0ToolbarShowReadAloud\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAlias\0EngineeringDrawi"
-    "ngEnhance\0DisableAutoLinks\0UseSysColors\0UseTabs\0SelectionToolbar\0SelectionToolbarLayout\0TabsMru\0CtrlTabSimp"
-    "le\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0HtmlUI"
-    "\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AntiGravity\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang"
-    "\0TranslateEngine\0\0Annotations\0\0ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0Selection"
-    "Handlers\0\0TextSnippets\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage"
-    "\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0HelpWindowPos\0FileStates\0SessionData\0ReopenOnce\0Ti"
-    "meOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0\0",
+    "s\0SortFavoritesByName\0ShowToc\0AlwaysShowSidebar\0SidebarOnRight\0SidebarWindowSize\0ShowLinks\0HighlightFormFie"
+    "lds\0ClickEdgeToTurnPage\0DisableLinks\0ExplorerQuickLook\0RememberViewOffsetOnPageTurn\0MouseWheelTurnsPage\0Scro"
+    "llEdgeTurnsPage\0ShowDocumentFocusIndicator\0ShowAnnotationNotification\0ShowFileNavigateHint\0ShowAnnotationAutho"
+    "rInTooltip\0ShowTocPageNumbers\0AutoGenerateTOC\0ShowStartPage\0SidebarDx\0Scrollbars\0ScrollbarInSinglePage\0Smoo"
+    "thScroll\0ScrollLineAmount\0SaveMemory\0PaddingAfterLastPage\0IgnoreDestinationZoom\0HighlightLinkDestination\0Cit"
+    "ationHoverDelay\0ReadAloudVoiceId\0ReadAloudSpeed\0ReadingAutoScrollSpeed\0ReadingBar\0FastScrollOverScrollbar\0Pr"
+    "eventSleepInFullscreen\0TabWidth\0Theme\0HelpTheme\0LastLightTheme\0LastDarkTheme\0DocumentColorsFollowTheme\0TocD"
+    "y\0ToolbarCustomLayout\0ToolbarShowReadAloud\0ToolbarSize\0TreeFontName\0TreeFontSize\0UIFontSize\0DisableAntiAlia"
+    "s\0EngineeringDrawingEnhance\0DisableAutoLinks\0UseSysColors\0UseTabs\0SelectionToolbar\0SelectionToolbarLayout\0T"
+    "absMru\0CtrlTabSimple\0ZoomLevels\0ZoomIncrement\0\0FixedPageUI\0\0EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0M"
+    "arkdownUI\0\0HtmlUI\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0AntiGravity\0\0AIChatSidebarDx\0\0TranslateToLang"
+    "\0TranslateFromLang\0TranslateEngine\0\0Annotations\0\0ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Full"
+    "screen\0\0SelectionHandlers\0\0TextSnippets\0\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPas"
+    "swords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchUIWindowPos\0HelpWindowPos\0FileStates\0SessionDa"
+    "ta\0ReopenOnce\0TimeOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0\0",
     "\0\0default layout of pages. valid values: automatic, single page, facing, book view, continuous, continuous "
     "facing, continuous book view, page aspect. page aspect (3.7+): first open of a PDF, XPS, DjVu or PostScript file "
     "uses page 1 — taller than wide is continuous + fit width, wider than tall is single page + fit page; a remembered "
@@ -2343,7 +2347,8 @@ static const StructInfo gSettingsInfo = {
     "movable window with a results list instead of the compact toolbar overlay\0if true, show the Favorites "
     "sidebar\0if true, favorites within each file are sorted alphabetically by name (or page label); if false (the "
     "default), they are sorted by page number\0if true, show the table of contents (Bookmarks) sidebar when the "
-    "document has one\0if true, put the bookmarks / favorites sidebar on the right of the window (left is the default; "
+    "document has one\0if true, every opened document shows the bookmarks / pages sidebar, even one last closed with "
+    "it hidden\0if true, put the bookmarks / favorites sidebar on the right of the window (left is the default; "
     "right-to-left UI languages already put it on the right)\0valid values: (empty), keep, grow\0if true, draw a blue "
     "border around links in the document\0if true, highlight empty fillable PDF form fields in pale blue so they are "
     "easy to find\0if true, a click (not a drag) on the left fifth of the page area goes to the previous page and a "

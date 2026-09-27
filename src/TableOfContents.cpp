@@ -13,6 +13,7 @@
 
 #include "gui/PlatformFont.h"
 #include "gui/Gfx.h"
+#include "gui/GuiColors.h"
 #include "gui/VirtCtrl.h"
 
 #include "Settings.h"
@@ -35,6 +36,7 @@
 #include "Theme.h"
 #include "FilterHighlightDraw.h"
 #include "TableOfContents.h"
+#include "CommandPalette.h"
 
 static void LayoutTocContainer(MainWindow* win);
 
@@ -427,9 +429,98 @@ void ToggleTocBox(MainWindow* win) {
         return;
     }
     SetSidebarVisibility(win, true, gSettings->showFavorites, SidebarResizeFrame::Adjust);
-    if (win->uiState.tocVisible) {
+    if (win->uiState.tocVisible && !win->tocShowingPages) {
         HwndSetFocus(win->tocTreeView->hwnd);
     }
+}
+
+// the panel opens on the page thumbnails; clicking "Bookmarks" in its header
+// switches (for the session)
+static bool gSidebarPreferPages = true;
+
+bool SidebarCanShowPages(MainWindow* win) {
+    return win->IsDocLoaded() && win->AsFixed() != nullptr;
+}
+
+// the left panel has something to show: bookmarks or page thumbnails
+bool SidebarHasContent(MainWindow* win) {
+    if (!win->IsDocLoaded() || !win->ctrl) {
+        return false;
+    }
+    return win->ctrl->HasToc() || SidebarCanShowPages(win);
+}
+
+// show the bookmarks tree or the page thumbnails, whichever was picked or is
+// the only one the document has
+void UpdateSidebarView(MainWindow* win) {
+    if (!win->tocLayout || !win->tocThumbnails) {
+        return;
+    }
+    bool canPages = SidebarCanShowPages(win);
+    bool pages = canPages && (gSidebarPreferPages || !win->tocLoaded);
+    bool changed = pages != win->tocShowingPages;
+    win->tocShowingPages = pages;
+
+    // header: "Bookmarks  Pages", the one shown in normal text, the other
+    // dimmed and clickable
+    win->tocLabel->SetIsVisible(win->tocLoaded || !canPages);
+    win->tocPagesLabel->SetIsVisible(canPages);
+    win->tocPagesLabel->font = win->tocLabel->font;
+    win->tocPagesLabel->padding = win->tocLabel->padding;
+    Color dim = ThemeWindowTextDisabledColor();
+    win->tocLabel->SetColor(kColText, pages ? dim : kColorUnset);
+    win->tocPagesLabel->SetColor(kColText, pages ? kColorUnset : dim);
+    win->tocLabel->cursor = pages ? CursorId::Hand : CursorId::None;
+    win->tocPagesLabel->cursor = pages ? CursorId::None : CursorId::Hand;
+    win->tocLabel->Invalidate();
+    win->tocPagesLabel->Invalidate();
+
+    if (changed || win->tocThumbnails->IsVisible() != pages) {
+        // ShowWindow() first: SetIsVisible() only flips WS_VISIBLE, which
+        // leaves the tree's pixels on screen, and makes ShowWindow() a no-op
+        ShowWindow(win->tocFilterEdit->hwnd, pages ? SW_HIDE : SW_SHOW);
+        ShowWindow(win->tocTreeView->hwnd, pages ? SW_HIDE : SW_SHOW);
+        win->tocFilterEdit->SetIsVisible(!pages);
+        win->tocTreeView->SetIsVisible(!pages);
+        win->tocThumbnails->SetIsVisible(pages);
+        if (pages && HwndIsFocused(win->tocTreeView->hwnd)) {
+            HwndSetFocus(win->hwndFrame);
+        }
+        // force a relayout: the size didn't change, what's in the VBox did
+        win->tocLayout->lastBounds = {};
+        LayoutTocContainer(win);
+        InvalidateRect(win->hwndTocBox, nullptr, TRUE);
+    }
+    SidebarThumbnailsUpdate(win->tocThumbnails, pages && win->uiState.tocVisible, win->currPageNo);
+}
+
+static void SidebarSwitchView(MainWindow* win, bool showPages) {
+    if (!IsMainWindowValid(win) || win->tocShowingPages == showPages) {
+        return;
+    }
+    if (!showPages && !win->tocLoaded) {
+        return;
+    }
+    gSidebarPreferPages = showPages;
+    UpdateSidebarView(win);
+}
+
+static void SidebarShowPagesDeferred(MainWindow* win) {
+    SidebarSwitchView(win, true);
+}
+
+static void SidebarShowBookmarksDeferred(MainWindow* win) {
+    SidebarSwitchView(win, false);
+}
+
+// the switch re-lays out the header we're being clicked in, so do it after the
+// click has been dispatched
+static void OnSidebarPagesLabelClick(MainWindow* win) {
+    uitask::Post(MkFunc0<MainWindow>(SidebarShowPagesDeferred, win));
+}
+
+static void OnSidebarBookmarksLabelClick(MainWindow* win) {
+    uitask::Post(MkFunc0<MainWindow>(SidebarShowBookmarksDeferred, win));
 }
 
 struct VistorForPageNoData {
@@ -622,6 +713,9 @@ static TocItem* FindVisibleParentTreeItem(TreeView* treeView, TocItem* ti) {
 }
 
 void UpdateTocSelection(MainWindow* win, int currPageNo) {
+    if (win->tocShowingPages && win->uiState.tocVisible) {
+        SidebarThumbnailsUpdate(win->tocThumbnails, true, currPageNo);
+    }
     auto* treeView = win->tocTreeView;
     if (!win->tocLoaded || !win->uiState.tocVisible || !treeView) {
         return;
@@ -1871,6 +1965,30 @@ void CreateToc(MainWindow* win) {
     win->tocCloseBtn = header.closeBtn;
     // label text is set in UpdateToolbarSidebarText()
 
+    // "Bookmarks  Pages  ...  ✕": the labels switch the panel's view
+    {
+        HBox* hbox = header.box;
+        hbox->children[0].flex = 0;
+        // labels ignore the mouse by default
+        header.label->SetFlag(vwfNoHitTest, false);
+        header.label->onClick = MkFunc0(OnSidebarBookmarksLabelClick, win);
+        auto* pagesLabel = NewVirtText({.font = labelFont, .isRtl = HwndIsRtl(win->hwndTocBox)});
+        pagesLabel->SetText(Tr("Pages"));
+        pagesLabel->SetFlag(vwfNoHitTest, false);
+        pagesLabel->onClick = MkFunc0(OnSidebarPagesLabelClick, win);
+        win->tocPagesLabel = pagesLabel;
+        boxElementInfo gapEl{};
+        gapEl.layout = new Spacer(DpiScaleByDpi(DpiGetForHwnd(win->hwndTocBox), 8), 0);
+        VecInsertAt(hbox->children, 1, gapEl);
+        boxElementInfo pagesEl{};
+        pagesEl.layout = pagesLabel;
+        VecInsertAt(hbox->children, 2, pagesEl);
+        boxElementInfo fillEl{};
+        fillEl.layout = new Spacer(0, 0);
+        fillEl.flex = 1;
+        VecInsertAt(hbox->children, 3, fillEl);
+    }
+
     auto* filterEdit = new Edit();
     {
         Edit::CreateArgs eargs;
@@ -1913,6 +2031,12 @@ void CreateToc(MainWindow* win) {
     vbox->AddChild(filterEdit);
     vbox->AddChild(new Spacer(0, 2)); // gap under the search field
     vbox->AddChild(treeView, 1);
+
+    // the page thumbnails take the place of the filter edit and tree
+    auto* thumbnails = NewSidebarThumbnails(win, GetAppFont(), DpiGetForHwnd(win->hwndTocBox));
+    thumbnails->SetIsVisible(false);
+    vbox->AddChild(thumbnails, 1);
+    win->tocThumbnails = thumbnails;
     win->tocLayout = vbox;
 
     SubclassToc(win);

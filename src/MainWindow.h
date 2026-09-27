@@ -11,6 +11,7 @@ struct FrameRateWnd;
 struct ReadAloudPlaybackBar;
 struct ReadingAutoScrollBar;
 struct VirtText;
+struct VirtListBox;
 struct VirtCloseButton;
 struct VirtRoot;
 struct VirtSplitter;
@@ -274,6 +275,12 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // VBox(label, filter edit, tree); owns those three controls and lays them
     // out in hwndTocBox
     ILayout* tocLayout = nullptr;
+    // "Pages" in the header, next to the "Bookmarks" label: switches the panel
+    // between the bookmarks tree and page thumbnails
+    VirtText* tocPagesLabel = nullptr;
+    VirtListBox* tocThumbnails = nullptr;
+    // the panel shows page thumbnails instead of the bookmarks
+    bool tocShowingPages = false;
 
     // whether the current tab's ToC has been loaded into the tree
     bool tocLoaded = false;

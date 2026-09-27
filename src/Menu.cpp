@@ -50,6 +50,7 @@
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
 #include "Menu.h"
+#include "TableOfContents.h"
 
 // value associated with menu item for owner-drawn purposes
 struct MenuOwnerDrawInfo {
@@ -2097,7 +2098,7 @@ static void MenuUpdateStateForWindow(MainWindow* win) {
 
     MenuUpdatePrintItem(win, win->menu);
 
-    bool enabled = win->IsDocLoaded() && tab && tab->ctrl->HasToc();
+    bool enabled = win->IsDocLoaded() && tab && SidebarHasContent(win);
     MenuSetEnabled(win->menu, CmdToggleBookmarks, enabled);
 
     bool documentSpecific = win->IsDocLoaded();
@@ -2415,7 +2416,7 @@ void OnWindowContextMenu(MainWindow* win, int x, int y) {
     SetMenuStateForSelection(tab, popup);
 
     MenuUpdatePrintItem(win, popup, true);
-    MenuSetEnabled(popup, CmdToggleBookmarks, win->ctrl->HasToc());
+    MenuSetEnabled(popup, CmdToggleBookmarks, SidebarHasContent(win));
     MenuSetChecked(popup, CmdToggleBookmarks, win->uiState.tocVisible);
 
     MenuSetEnabled(popup, CmdFavoriteToggle, HasFavorites());

@@ -452,6 +452,9 @@ struct VirtListBox : VirtCtrl {
     // Shift/Ctrl click, Shift+arrows and Ctrl+A; off by default so other
     // lists stay single-select
     bool multiSelect = false;
+    // tall rows (thumbnails): show partly visible rows and scroll the wheel
+    // by pixels instead of whole rows
+    bool smoothScroll = false;
 
     VirtListBox();
     ~VirtListBox() override;
@@ -483,6 +486,7 @@ struct VirtListBox : VirtCtrl {
     void ToggleSelected(int idx);
     int ItemFromPoint(Point ptLocal);
     // the row's rectangle in window coords; empty when the row isn't visible
+    // (with smoothScroll, partly visible rows count)
     Rect ItemRect(int idx);
     void EnsureVisible(int idx);
     int ViewportDy();

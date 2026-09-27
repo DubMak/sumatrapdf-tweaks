@@ -13,6 +13,10 @@ void ExpandTocToCurrentPage(MainWindow*);
 void UpdateTocExpansionState(Vec<int>& tocState, TreeView*, TocTree*);
 void UnsubclassToc(MainWindow*);
 void TocFilterChanged(MainWindow*);
+// the left panel can show page thumbnails instead of (or without) bookmarks
+bool SidebarCanShowPages(MainWindow*);
+bool SidebarHasContent(MainWindow*);
+void UpdateSidebarView(MainWindow*);
 
 // When true (default), the bookmarks pane highlights every TOC entry that
 // matches the current page (same page number as the best match, plus the

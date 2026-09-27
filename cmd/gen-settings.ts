@@ -1441,6 +1441,12 @@ const globalPrefs: Field[] = [
   ).ver("3.7"),
   field("ShowToc", Bool, true, "if true, show the table of contents (Bookmarks) sidebar when the document has one"),
   field(
+    "AlwaysShowSidebar",
+    Bool,
+    false,
+    "if true, every opened document shows the bookmarks / pages sidebar, even one last closed with it hidden",
+  ),
+  field(
     "SidebarOnRight",
     Bool,
     false,
@@ -2106,6 +2112,7 @@ const globalPrefsLayout = [
   "ShowFavorites",
   "SortFavoritesByName",
   "ShowToc",
+  "AlwaysShowSidebar",
   "SidebarOnRight",
   "SidebarWindowSize",
   "ShowLinks",

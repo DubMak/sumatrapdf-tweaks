@@ -2337,6 +2337,9 @@ static void UpdateUiForCurrentTab(MainWindow* win) {
 }
 
 static bool showTocByDefault(Str path, EngineBase* engine) {
+    if (gSettings->alwaysShowSidebar) {
+        return true;
+    }
     if (!gSettings->showToc) {
         return false;
     }
@@ -2525,7 +2528,7 @@ static void ReplaceDocumentInCurrentTab(LoadArgs* args, DocController* ctrl, Fil
         } else if (fs->windowState == WIN_STATE_MINIMIZED) {
             showType = SW_MINIMIZE;
         }
-        showToc = fs->showToc;
+        showToc = fs->showToc || gSettings->alwaysShowSidebar;
         if (win->ctrl && win->presentation) {
             showToc = tab->showTocPresentation;
         }
@@ -8306,6 +8309,9 @@ static void ApplySidebarDpiFonts(MainWindow* win, int dpi) {
     if (win->tocLabel) {
         win->tocLabel->font = labelFont;
     }
+    if (win->tocPagesLabel) {
+        win->tocPagesLabel->font = labelFont;
+    }
     if (win->favLabel) {
         win->favLabel->font = labelFont;
     }
@@ -10066,7 +10072,8 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     EngineBase* engine = win->CurrentTab() ? win->CurrentTab()->GetEngine() : nullptr;
     bool headingPending = EngineMupdfHeadingTocPending(engine);
 
-    if (!win->IsDocLoaded() || !win->ctrl || !win->ctrl->HasToc()) {
+    // documents without bookmarks can still show page thumbnails
+    if (!SidebarHasContent(win)) {
         tocVisible = false;
     }
 
@@ -10077,7 +10084,7 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
 
     if (tocVisible) {
         LoadTocTree(win);
-        if (!win->tocLoaded) {
+        if (!win->tocLoaded && !SidebarCanShowPages(win)) {
             tocVisible = false;
         }
     }
@@ -10089,7 +10096,7 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     if (!win->CurrentTab()) {
         ReportIf(tocVisible);
     } else if (!win->presentation) {
-        if (win->ctrl && (win->ctrl->HasToc() || headingPending)) {
+        if (win->ctrl && (SidebarHasContent(win) || headingPending)) {
             win->CurrentTab()->showToc = requestedToc;
         } else {
             win->CurrentTab()->showToc = tocVisible;
@@ -10112,6 +10119,7 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     bool wasSidebar = win->uiState.tocVisible || win->uiState.favVisible;
     win->uiState.tocVisible = tocVisible;
     win->uiState.favVisible = showFavorites;
+    UpdateSidebarView(win);
     bool nowSidebar = tocVisible || showFavorites;
     if (resizeFrame == SidebarResizeFrame::Adjust && wasSidebar != nowSidebar) {
         AdjustFrameForSidebar(win, nowSidebar);
