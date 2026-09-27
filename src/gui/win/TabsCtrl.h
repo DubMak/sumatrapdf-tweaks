@@ -27,6 +27,8 @@ struct TabInfo {
     // document failed to load: the title paints in red
     bool isError = false;
     UINT_PTR userData = 0;
+    // painted as selected while the tab with this userData is (split view)
+    UINT_PTR pairedWith = 0;
     Color tabColor = (Color)0xfeffffff; // kColorUnset; use default tab color
 
     TabInfo() = default;

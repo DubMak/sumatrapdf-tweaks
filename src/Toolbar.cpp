@@ -648,6 +648,8 @@ static void SetPdfAnnotationsToolbarVisible(MainWindow* win, bool visible) {
 
 // TODO: this is called too often
 // TODO: also set checked state instead of calling SetToolbarButtonCheckedState() all over
+static void UpdateTabsDirty(MainWindow* win);
+
 void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
     int n = TotalButtonsCount();
     bool visibilityChanged = false;
@@ -760,12 +762,24 @@ void ToolbarUpdateStateForWindow(MainWindow* win, bool setButtonsVisibility) {
         UpdateToolbarFindText(win);
     }
 
-    // update dirty (unsaved annotations) flag and tooltip on each tab
+    UpdateTabsDirty(win);
+    // a split-view pane's document is shown by a tab of its host
+    if (win->splitHost) {
+        UpdateTabsDirty(win->splitHost);
+    }
+}
+
+// update dirty (unsaved annotations) flag and tooltip on each tab
+static void UpdateTabsDirty(MainWindow* win) {
     if (win->tabsCtrl) {
         int nTabs = win->TabCount();
         for (int i = 0; i < nTabs; i++) {
             WindowTab* tab = win->GetTab(i);
             bool dirty = false;
+            // the split-view stand-in tab: its document is in the pane
+            if (tab && tab == win->splitPeerTab && win->splitPane && win->splitPane->CurrentTab()) {
+                tab = win->splitPane->CurrentTab();
+            }
             if (tab && tab->AsFixed()) {
                 dirty = EngineHasUnsavedAnnotations(tab->AsFixed()->GetEngine());
             }
@@ -3406,7 +3420,12 @@ static void PaintToolbarBackground(MainWindow*, VirtHostPaintEvent* ev) {
 // the default theme separates the toolbar from the canvas with a hairline.
 // Use the document background, not ThemeEdgeColor: on Light that is #c0c0c0
 // and reads as a dark strip against the page.
-static void PaintToolbarEdge(MainWindow*, VirtHostPaintEvent* ev) {
+static void PaintToolbarEdge(MainWindow* win, VirtHostPaintEvent* ev) {
+    // split view: an accent line on top of the side that gets the keyboard
+    if (SplitViewIsFocusedSide(win)) {
+        Rect rc = ev->clientRect;
+        ev->gfx->FillRect({rc.x, rc.y, rc.dx, DpiScale(3)}, SysHighlightBgColor());
+    }
     if (!IsCurrentThemeDefault() || ThemeColorizeControls()) {
         return;
     }
@@ -3415,6 +3434,13 @@ static void PaintToolbarEdge(MainWindow*, VirtHostPaintEvent* ev) {
     Rect rc = ev->clientRect;
     int y = ToolbarAtBottom() ? rc.y : (rc.Bottom() - 1);
     ev->gfx->FillRect({rc.x, y, rc.dx, 1}, canvasBg);
+}
+
+void ToolbarRepaint(MainWindow* win) {
+    VirtHost* host = ToolbarHost(win);
+    if (host) {
+        host->Invalidate(true);
+    }
 }
 
 static const WStr kToolbarHostClass = WStrL(L"SUMATRA_VIRT_TOOLBAR");

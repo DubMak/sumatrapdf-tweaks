@@ -1093,10 +1093,18 @@ MainWindow* FindMainWindowByHwnd(HWND hwnd) {
     if (!::IsWindow(hwnd)) {
         return nullptr;
     }
+    // a split-view pane's frame is a child of its host's frame, so a pane's
+    // HWND matches both: the innermost frame wins
+    MainWindow* found = nullptr;
     for (MainWindow* win : gWindows) {
         if ((win->hwndFrame == hwnd) || ::IsChild(win->hwndFrame, hwnd)) {
-            return win;
+            if (!found || ::IsChild(found->hwndFrame, win->hwndFrame)) {
+                found = win;
+            }
         }
+    }
+    if (found) {
+        return found;
     }
     // Owned popups (find bar / find window) and their children are WS_POPUP, not
     // WS_CHILD of the frame, so IsChild misses them. ComboLBox (dropped history)

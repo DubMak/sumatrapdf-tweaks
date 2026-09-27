@@ -332,8 +332,10 @@ enum {
     CmdSignWithImage = 526,
     CmdInsertTextSnippet = 527,
     CmdSave = 528,
+    CmdSplitWithCurrentTab = 529,
+    CmdCloseSplitView = 530,
 
-    CmdLast = 528,
+    CmdLast = 530,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering

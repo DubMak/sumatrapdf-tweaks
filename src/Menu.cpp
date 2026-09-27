@@ -3379,7 +3379,7 @@ void RebuildMenuBarButtons(MainWindow* win) {
 }
 
 void CreateMenuBarRebar(MainWindow* win) {
-    if (!win || win->hwndMenuReBar) {
+    if (!win || win->hwndMenuReBar || win->splitHost) {
         return;
     }
     // embedded hosts (TC lister) must not get titlebar menu rebar chrome

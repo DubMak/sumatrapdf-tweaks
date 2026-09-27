@@ -120,6 +120,12 @@ bool TabCtrl::IsSelected() {
     if (tc->IsValidIdx(tc->tabForceShowSelected)) {
         return idx == tc->tabForceShowSelected;
     }
+    if (ti->pairedWith) {
+        TabInfo* sel = tc->GetTab(tc->selectedIdx);
+        if (sel && sel->userData == ti->pairedWith) {
+            return true;
+        }
+    }
     return idx == tc->selectedIdx;
 }
 
@@ -649,13 +655,15 @@ static void TriggerSelectionChanged(TabsCtrl* tabs) {
     tabs->onSelectionChanged.Call(&ev);
 }
 
-static bool TriggerSelectionChanging(TabsCtrl* tabs) {
+static bool TriggerSelectionChanging(TabsCtrl* tabs, int tabIdx) {
     if (!tabs->onSelectionChanging.IsValid()) {
         // allow changing
         return false;
     }
 
     TabsCtrl::SelectionChangingEvent ev;
+    ev.tabs = tabs;
+    ev.tabIdx = tabIdx;
     tabs->onSelectionChanging.Call(&ev);
     return ev.preventChanging;
 }
@@ -722,7 +730,7 @@ void TabsCtrl::OnTabMouseDown(TabCtrl* tab, VirtMouseEvent& ev) {
     int idx = tab->Idx();
     UpdateHover(idx);
     if (idx != selectedIdx) {
-        if (TriggerSelectionChanging(this)) {
+        if (TriggerSelectionChanging(this, idx)) {
             return;
         }
         SetSelected(idx);

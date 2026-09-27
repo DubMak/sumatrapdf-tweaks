@@ -829,6 +829,10 @@ static bool WindowHasDocumentLoading(MainWindow* win) {
 // update global windowState for next default launch when either
 // no pdf is opened or a document without window dimension information
 void RememberDefaultWindowPosition(MainWindow* win) {
+    // a split-view pane's position is its host's
+    if (win->splitHost) {
+        return;
+    }
     // ignore spurious WM_SIZE and WM_MOVE messages happening during initialization
     if (!HwndIsVisible(win->hwndFrame)) {
         return;
@@ -1665,9 +1669,22 @@ bool ToolbarAtBottom() {
     return ToolbarPositionFromPrefs() == kToolbarBottom;
 }
 
+// split view is up: the host shows its current tab (the left side) with the
+// pane next to it
+static bool IsSplitShowing(MainWindow* win) {
+    return win && win->splitPane && win->splitLeftTab && win->CurrentTab() == win->splitLeftTab;
+}
+
 // Reverse the content-row HBox so the sidebar is on the right. RTL frames
 // already mirror via WS_EX_LAYOUTRTL, so don't also reverse the HBox.
-static bool SidebarOnRightLayout() {
+// In split view each side's sidebar is on its outer edge.
+static bool SidebarOnRightLayout(MainWindow* win) {
+    if (win && win->splitHost) {
+        return !IsUIRtl();
+    }
+    if (IsSplitShowing(win)) {
+        return false;
+    }
     return gSettings && gSettings->sidebarOnRight && !IsUIRtl();
 }
 
@@ -3102,7 +3119,7 @@ void FrameSyncSplitters(MainWindow* win) {
     if (win->captionLayout) {
         CollectVirtCtrls(win->captionLayout, tops);
     }
-    VirtSplitter* all[] = {win->sidebarSplitter, win->favSplitter, win->aiChatSplitter};
+    VirtSplitter* all[] = {win->sidebarSplitter, win->favSplitter, win->aiChatSplitter, win->splitSplitter};
     for (VirtSplitter* s : all) {
         if (s) {
             VecAppend(tops, s);
@@ -3198,6 +3215,8 @@ static void CreateCaptionLayout(MainWindow* win) {
 // HwndSlot; RelayoutFrame sets winPos so SetBounds batches the moves.
 // The AI chat parts stay in the row even while that panel doesn't exist —
 // they are simply collapsed.
+static void OnSplitViewSplitterMove(VirtSplitter::MoveEvent* ev);
+
 static void CreateFrameLayout(MainWindow* win) {
     win->tocSlot = new HwndSlot();
     win->favSlot = new HwndSlot();
@@ -3216,6 +3235,13 @@ static void CreateFrameLayout(MainWindow* win) {
     // when the drag ends
     win->aiChatSplitter = NewFrameSplitter(SplitterType::Vert, false);
     win->aiChatSplitter->thickness = kSplitterDx;
+
+    // split view: between this window's content and the pane (the pane's
+    // own canvas re-lays out on release)
+    win->splitSplitter = NewFrameSplitter(SplitterType::Vert, false);
+    win->splitSplitter->thickness = kSplitterDx;
+    win->splitSplitter->onMove = MkFunc1Void(OnSplitViewSplitterMove);
+    win->splitSlot = new HwndSlot();
 
     auto* sidebar = new VBox();
     sidebar->alignCross = CrossAxisAlign::Stretch;
@@ -3242,9 +3268,20 @@ static void CreateFrameLayout(MainWindow* win) {
     chrome->AddChild(win->captionLayout);
     chrome->AddChild(win->tabsSlot);
     chrome->AddChild(win->menuSlot);
-    chrome->AddChild(win->toolbarTopSlot);
-    chrome->AddChild(win->frameLayout, 1);
-    chrome->AddChild(win->toolbarBottomSlot);
+
+    // this window's document (toolbar + content row), then the split-view pane
+    auto* left = new VBox();
+    left->alignCross = CrossAxisAlign::Stretch;
+    left->AddChild(win->toolbarTopSlot);
+    left->AddChild(win->frameLayout, 1);
+    left->AddChild(win->toolbarBottomSlot);
+
+    auto* body = new HBox();
+    body->alignCross = CrossAxisAlign::Stretch;
+    body->AddChild(left, 1);
+    body->AddChild(win->splitSplitter);
+    body->AddChild(win->splitSlot);
+    chrome->AddChild(body, 1);
     win->chromeLayout = chrome;
     FrameSyncSplitters(win);
 }
@@ -3319,53 +3356,73 @@ static void UpdateWindowFrameBorderColor(MainWindow* win) {
 
 static void OnDpiChanged(MainWindow* win, RECT* suggested, int explicitDpi = 0, bool force = false);
 
-static MainWindow* CreateMainWindow() {
-    // -window-pos wins over both the remembered position and the default, and
-    // skips the per-window shift below: a test asked for an exact rectangle
-    bool fixedPos = gCli && !gCli->windowPos.IsEmpty();
-    Rect windowPos = fixedPos ? gCli->windowPos : gSettings->windowPos;
-    if (!windowPos.IsEmpty()) {
-        EnsureAreaVisibility(windowPos);
-    } else {
-        windowPos = GetDefaultWindowPos();
-    }
-    // DPI of the monitor the window will sit on, before CreateWindow. A new
-    // hwnd's GetDpiForWindow() is the process / primary DPI, which is wrong
-    // when launching on a secondary screen (discussion #4831).
-    int posDpi = DpiGetForPoint(windowPos.x + (windowPos.dx / 2), windowPos.y + (windowPos.dy / 2));
-    if (posDpi <= 0) {
-        posDpi = 96;
-    }
-    DpiSet(posDpi, posDpi);
-    // we don't want the windows to overlap so shift each window by a bit
-    if (!fixedPos) {
-        int nShift = len(gWindows);
-        windowPos.x += nShift * DpiScale(15);
-    }
-
+// host: create a split-view pane, a frame embedded as a child of host's frame
+// (hidden until host's RelayoutFrame places it)
+static MainWindow* CreateMainWindow(MainWindow* host = nullptr) {
     WStr clsName = WStr(kFrameClassName);
     WStr title = WStr(kSumatraWindowTitleW);
-    DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
-    int x = windowPos.x;
-    int y = windowPos.y;
-    int dx = windowPos.dx;
-    int dy = windowPos.dy;
     HINSTANCE h = GetModuleHandle(nullptr);
-    HWND hwndFrame =
-        CreateWindowExW(WS_EX_APPWINDOW, clsName.s, title.s, style, x, y, dx, dy, nullptr, nullptr, h, nullptr);
-    if (!hwndFrame) {
-        return nullptr;
-    }
-    // WM_NCCALCSIZE returning 0 disables DWM rounded corners; re-enable them.
-    if (!IsRunningOnWine()) {
-        SetWindowRoundedCorners(hwndFrame, true);
+    HWND hwndFrame = nullptr;
+    int posDpi = 96;
+    if (host) {
+        posDpi = host->frameDpi;
+        DpiSet(posDpi, posDpi);
+        Rect rcHost = HwndClientRect(host->hwndFrame);
+        DWORD style = WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+        hwndFrame = CreateWindowExW(0, clsName.s, title.s, style, 0, 0, rcHost.dx / 2, rcHost.dy, host->hwndFrame,
+                                    nullptr, h, nullptr);
+        if (!hwndFrame) {
+            return nullptr;
+        }
+    } else {
+        // -window-pos wins over both the remembered position and the default, and
+        // skips the per-window shift below: a test asked for an exact rectangle
+        bool fixedPos = gCli && !gCli->windowPos.IsEmpty();
+        Rect windowPos = fixedPos ? gCli->windowPos : gSettings->windowPos;
+        if (!windowPos.IsEmpty()) {
+            EnsureAreaVisibility(windowPos);
+        } else {
+            windowPos = GetDefaultWindowPos();
+        }
+        // DPI of the monitor the window will sit on, before CreateWindow. A new
+        // hwnd's GetDpiForWindow() is the process / primary DPI, which is wrong
+        // when launching on a secondary screen (discussion #4831).
+        posDpi = DpiGetForPoint(windowPos.x + (windowPos.dx / 2), windowPos.y + (windowPos.dy / 2));
+        if (posDpi <= 0) {
+            posDpi = 96;
+        }
+        DpiSet(posDpi, posDpi);
+        // we don't want the windows to overlap so shift each window by a bit
+        if (!fixedPos) {
+            int nShift = len(gWindows);
+            windowPos.x += nShift * DpiScale(15);
+        }
+
+        DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+        int x = windowPos.x;
+        int y = windowPos.y;
+        int dx = windowPos.dx;
+        int dy = windowPos.dy;
+        hwndFrame =
+            CreateWindowExW(WS_EX_APPWINDOW, clsName.s, title.s, style, x, y, dx, dy, nullptr, nullptr, h, nullptr);
+        if (!hwndFrame) {
+            return nullptr;
+        }
+        // WM_NCCALCSIZE returning 0 disables DWM rounded corners; re-enable them.
+        if (!IsRunningOnWine()) {
+            SetWindowRoundedCorners(hwndFrame, true);
+        }
+        ReportIf(nullptr != FindMainWindowByHwnd(hwndFrame));
     }
 
-    ReportIf(nullptr != FindMainWindowByHwnd(hwndFrame));
     MainWindow* win = new MainWindow(hwndFrame);
+    win->splitHost = host;
     win->frameDpi = RoundUp(posDpi, 4);
     DpiSet(win->frameDpi, win->frameDpi);
-    UpdateWindowFrameBorderColor(win);
+    if (!host) {
+        UpdateWindowFrameBorderColor(win);
+    }
+    DWORD style = 0;
 
     // don't add a WS_EX_STATICEDGE so that the scrollbars touch the
     // screen's edge when maximized (cf. Fitts' law) and there are
@@ -3449,7 +3506,7 @@ static MainWindow* CreateMainWindow() {
     // is deferred to ShowMainWindow so the shell sees a normal frame during
     // the first ShowWindow and creates the taskbar button.
     {
-        bool inTitleBar = SettingsUseTabs();
+        bool inTitleBar = SettingsUseTabs() && !host;
         win->tabsInTitlebar = inTitleBar;
         win->tabsCtrl->inTitleBar = inTitleBar;
         if (inTitleBar) {
@@ -3458,7 +3515,7 @@ static MainWindow* CreateMainWindow() {
     }
 
     // now show the menu bar in the appropriate style
-    if (IsMenubarVisible() && !NeedsWindowEmbeddingHacks()) {
+    if (IsMenubarVisible() && !NeedsWindowEmbeddingHacks() && !host) {
         if (win->tabsInTitlebar) {
             CreateMenuBarRebar(win);
         } else {
@@ -3483,6 +3540,13 @@ static MainWindow* CreateMainWindow() {
 }
 
 void ShowMainWindow(MainWindow* win, int windowState) {
+    // a split-view pane is shown (and placed) by its host's layout
+    if (win->splitHost) {
+        MainWindow* host = win->splitHost;
+        host->uiState.layout = {};
+        RelayoutFrame(host);
+        return;
+    }
     if (WIN_STATE_FULLSCREEN == windowState || WIN_STATE_MAXIMIZED == windowState) {
         ShowWindow(win->hwndFrame, SW_MAXIMIZE);
     } else {
@@ -3631,6 +3695,29 @@ MainWindow* CreateAndShowMainWindow(SessionData* data, bool showWin) {
     return win;
 }
 
+// the pane of host's split view went away: drop host's stand-in tab for it
+static void SplitViewOnPaneGone(MainWindow* host, MainWindow* pane) {
+    if (!IsMainWindowValid(host) || host->splitPane != pane) {
+        return;
+    }
+    WindowTab* proxy = host->splitPeerTab;
+    host->splitPane = nullptr;
+    host->splitLeftTab = nullptr;
+    host->splitPeerTab = nullptr;
+    if (host->isBeingClosed) {
+        // the proxy stays in the tab list; closing host deletes it
+        return;
+    }
+    if (proxy && host->GetTabIdx(proxy) >= 0) {
+        RemoveTab(proxy);
+        delete proxy;
+    }
+    if (IsMainWindowValid(host)) {
+        host->uiState.layout = {};
+        RelayoutFrame(host);
+    }
+}
+
 void DeleteMainWindow(MainWindow* win) {
     int winIdx = VecRemove(gWindows, win);
 
@@ -3640,6 +3727,15 @@ void DeleteMainWindow(MainWindow* win) {
     if (winIdx < 0) {
         logf("  not deleting because not in gWindows, probably already deleted\n");
         return;
+    }
+    if (win->splitHost) {
+        MainWindow* host = win->splitHost;
+        win->splitHost = nullptr;
+        SplitViewOnPaneGone(host, win);
+    }
+    if (win->splitPane) {
+        win->splitPane->splitHost = nullptr;
+        win->splitPane = nullptr;
     }
 
     DeletePropertiesWindow(win->hwndFrame);
@@ -4162,14 +4258,39 @@ MainWindow* LoadDocumentFinish(LoadArgs* args) {
     return win;
 }
 
+// the most recent window that is not a split-view pane
+static MainWindow* LastTopLevelWindow() {
+    for (int i = len(gWindows) - 1; i >= 0; i--) {
+        if (!gWindows[i]->splitHost) {
+            return gWindows[i];
+        }
+    }
+    return nullptr;
+}
+
+static int CountTopLevelWindows() {
+    int n = 0;
+    for (MainWindow* w : gWindows) {
+        if (!w->splitHost) {
+            n++;
+        }
+    }
+    return n;
+}
+
 static MainWindow* MaybeCreateWindowForFileLoad(LoadArgs* args) {
+    // a split-view pane only shows the document it was created for; other
+    // files open in its host
+    if (args->win && args->win->splitHost && !args->forceReuse && args->win->IsDocLoaded()) {
+        args->win = args->win->splitHost;
+    }
     MainWindow* win = args->win;
     bool openNewTab = SettingsUseTabs() && !args->forceReuse && !args->forceNewWindow;
     if (openNewTab && !args->win) {
         // modify the args so that we always reuse the same window
         // TODO: enable the tab bar if tabs haven't been initialized
         if (len(gWindows) > 0) {
-            win = VecLast(gWindows);
+            win = LastTopLevelWindow();
             args->win = win;
             args->isNewWindow = false;
         }
@@ -4941,6 +5062,15 @@ void LoadModelIntoTab(WindowTab* tab) {
     }
 
     MainWindow* win = tab->win;
+    // the split-view stand-in tab: its document is in the pane, show the
+    // left side instead
+    if (win && tab == win->splitPeerTab && win->splitLeftTab) {
+        int leftIdx = win->GetTabIdx(win->splitLeftTab);
+        if (leftIdx >= 0) {
+            win->tabsCtrl->SetSelected(leftIdx);
+            tab = win->splitLeftTab;
+        }
+    }
     ReadingAutoScrollHideBar(win);
     ReadingBarCancelDrag(win);
     // Document content is about to change; drop any page-element / about-page tip
@@ -5322,6 +5452,7 @@ static void OnMenuExit() {
         }
     }
 
+    // a split-view pane is closed by its host
     // we want to preserve the session state of all windows,
     // so we save it now
     // since we are closing the windows one by one,
@@ -5335,6 +5466,9 @@ static void OnMenuExit() {
     // so use a stable copy for iteration
     Vec<MainWindow*> toClose = gWindows;
     for (MainWindow* win : toClose) {
+        if (!IsMainWindowValid(win) || win->splitHost) {
+            continue;
+        }
         CloseWindow(win, true, false);
     }
 }
@@ -5932,6 +6066,21 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     logf("CloseTab: tab: 0x%p win: 0x%p, hwndFrame: 0x%x, quitIfLast: %d, dm: 0x%p\n", tab, win, win->hwndFrame,
          (int)quitIfLast, tab->AsFixed());
 
+    // split view: the stand-in tab closes the pane; closing the left side
+    // ends the split first (the pane's document goes back to a tab)
+    if (win->splitPane && tab == win->splitPeerTab) {
+        CloseWindow(win->splitPane, false, false);
+        return;
+    }
+    if (win->splitPane && tab == win->splitLeftTab) {
+        if (!SplitViewEnd(win, true, false)) {
+            return;
+        }
+        if (!TabStillInWindow(win, tab)) {
+            return;
+        }
+    }
+
     AbortFinding(win, true);
     if (!TabStillInWindow(win, tab)) {
         return;
@@ -6022,7 +6171,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     if (lastTab && lastTab->type == WindowTab::Type::About) {
         // showing only home page tab so remove it
         // if there are other windows, close this one
-        if (len(gWindows) > 1) {
+        if (CountTopLevelWindows() > 1) {
             CloseWindow(win, false, false);
         } else {
             tab = win->GetTab(0);
@@ -6150,9 +6299,32 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
         return;
     }
 
+    // a split-view pane is a child of this frame: close it first
+    if (win->splitPane) {
+        MainWindow* pane = win->splitPane;
+        CloseWindow(pane, forceClose, forceClose);
+        if (!IsMainWindowValid(win)) {
+            return;
+        }
+        if (IsMainWindowValid(pane)) {
+            if (forceClose) {
+                DeleteMainWindow(pane);
+            } else {
+                // the pane's document wasn't let go (unsaved changes)
+                win->isBeingClosed = false;
+                for (auto& tab : win->Tabs()) {
+                    if (tab->AsFixed()) {
+                        tab->AsFixed()->pauseRendering = false;
+                    }
+                }
+                return;
+            }
+        }
+    }
+
     // Stop eventual TTS reading
     StopReadAloudIfSourceWindow(win);
-    bool lastWindow = (1 == len(gWindows));
+    bool lastWindow = !win->splitHost && (1 == CountTopLevelWindows());
     // if not the last window, save after the window is removed from gWindows
     // (so its now-closed state isn't re-saved); via defer so it also runs on the
     // reentrant early-return path below (#5418, #5668)
@@ -6203,6 +6375,264 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose) {
         logf("Calling PostQuitMessage() in CloseWindow() because closing lastWindow, nWindows: %d\n", nWindows);
         ReportDebugIf(nWindows != 0);
         PostQuitMessage(0);
+    }
+}
+
+//--- split view
+
+static TabState* NewTabStateFromTab(WindowTab* tab);
+
+// focus the pane of host's split view, showing its left side (a click on the
+// stand-in tab)
+void SplitViewFocusPane(MainWindow* host) {
+    if (!IsMainWindowValidAndNotClosing(host) || !host->splitPane) {
+        return;
+    }
+    WindowTab* left = host->splitLeftTab;
+    if (left && host->CurrentTab() != left) {
+        int idx = host->GetTabIdx(left);
+        if (idx >= 0) {
+            TabsSelect(host, idx);
+        }
+    }
+    if (IsMainWindowValidAndNotClosing(host) && host->splitPane) {
+        HwndSetFocus(host->splitPane->hwndCanvas);
+    }
+}
+
+// Show peer (a tab of host) next to host's current tab. The tab is replaced
+// by a stand-in and its document re-opened in the pane
+void SplitViewStart(MainWindow* host, WindowTab* peer) {
+    if (!IsMainWindowValidAndNotClosing(host) || host->splitHost || !peer || peer->win != host) {
+        return;
+    }
+    WindowTab* left = host->CurrentTab();
+    if (!left || left->IsNonDocumentTab() || !left->ctrl) {
+        return;
+    }
+    if (peer == left || peer->IsNonDocumentTab() || peer == host->splitPeerTab || len(peer->filePath) == 0) {
+        return;
+    }
+    // its unsaved changes would be lost by the re-open
+    if (EngineHasUnsavedAnnotations(peer->GetEngine())) {
+        NotificationCreateArgs nargs;
+        nargs.hwndParent = host->hwndCanvas;
+        nargs.msg = Tr("Save or discard the changes in that tab first");
+        nargs.warning = true;
+        ShowNotification(nargs);
+        return;
+    }
+    if (host->splitPane) {
+        if (!SplitViewEnd(host, true, false)) {
+            return;
+        }
+        if (!IsMainWindowValidAndNotClosing(host) || host->GetTabIdx(peer) < 0 || host->GetTabIdx(left) < 0) {
+            return;
+        }
+        TabsSelect(host, host->GetTabIdx(left));
+        if (host->CurrentTab() != left) {
+            return;
+        }
+    }
+
+    Str path = str::Dup(peer->filePath);
+    Str displayName = peer->displayName ? str::Dup(peer->displayName) : Str();
+    TabState* state = peer->tabState ? CloneTabState(peer->tabState) : NewTabStateFromTab(peer);
+    Color tabColor = peer->tabColor;
+    defer {
+        str::Free(path);
+        str::Free(displayName);
+        DeleteTabState(state);
+    };
+
+    ResetReadAloudStateForTab(peer);
+    ReadingAutoScrollForgetTab(peer);
+    ReadingBarForgetTab(peer);
+    RemoveNotificationsForTab(peer);
+    RemoveTab(peer);
+    delete peer;
+    if (!IsMainWindowValidAndNotClosing(host) || host->CurrentTab() != left) {
+        return;
+    }
+
+    WindowTab* proxy = new WindowTab(host);
+    proxy->SetFilePath(path);
+    if (displayName) {
+        proxy->SetDisplayName(displayName);
+    }
+    proxy->tabColor = tabColor;
+
+    MainWindow* pane = CreateMainWindow(host);
+    if (!pane) {
+        delete proxy;
+        return;
+    }
+    InsertSplitPeerTab(host, proxy, host->GetTabIdx(left) + 1, left);
+    host->splitPane = pane;
+    host->splitLeftTab = left;
+    host->splitPeerTab = proxy;
+
+    ShowOrHideToolbar(pane);
+    SetSidebarVisibility(pane, false, false);
+    ToolbarUpdateStateForWindow(pane, true);
+    host->uiState.layout = {};
+    RelayoutFrame(host);
+
+    LoadArgs args(path, pane);
+    args.showWin = true;
+    args.noPlaceWindow = true;
+    LoadDocument(&args);
+    if (!IsMainWindowValid(pane)) {
+        return;
+    }
+    WindowTab* paneTab = pane->CurrentTab();
+    if (state && paneTab && paneTab->ctrl) {
+        SetTabState(paneTab, state);
+    }
+    // the pane shows just this document: drop the Home tab it got first
+    for (WindowTab* t : pane->Tabs()) {
+        if (t->IsAboutTab() && t != pane->CurrentTab()) {
+            RemoveTab(t);
+            delete t;
+            break;
+        }
+    }
+    ScheduleSaveSettings();
+}
+
+// "Split With Current Tab" from the palette / menu: the next document tab
+// (else the previous one) goes next to the current one
+void SplitViewStartDefault(MainWindow* win) {
+    if (!win) {
+        return;
+    }
+    MainWindow* host = win->splitHost ? win->splitHost : win;
+    WindowTab* cur = host->CurrentTab();
+    if (!cur || cur->IsNonDocumentTab()) {
+        return;
+    }
+    int curIdx = host->GetTabIdx(cur);
+    int n = host->TabCount();
+    for (int i = 1; i < n; i++) {
+        WindowTab* t = host->GetTab((curIdx + i) % n);
+        if (t && t != host->splitPeerTab && !t->IsNonDocumentTab()) {
+            SplitViewStart(host, t);
+            return;
+        }
+    }
+}
+
+// Close host's split view. reopenPeer: the pane's document goes back to a
+// tab (appended). Returns false if the pane refused to close
+bool SplitViewEnd(MainWindow* host, bool reopenPeer, bool selectLeft) {
+    if (!IsMainWindowValid(host) || !host->splitPane) {
+        return true;
+    }
+    MainWindow* pane = host->splitPane;
+    WindowTab* left = host->splitLeftTab;
+    WindowTab* paneTab = pane->CurrentTab();
+    Str path;
+    TabState* state = nullptr;
+    if (reopenPeer && paneTab && !paneTab->IsAboutTab() && len(paneTab->filePath) > 0) {
+        path = str::Dup(paneTab->filePath);
+        state = NewTabStateFromTab(paneTab);
+    }
+    defer {
+        str::Free(path);
+        DeleteTabState(state);
+    };
+    CloseWindow(pane, false, false);
+    if (!IsMainWindowValid(host)) {
+        return false;
+    }
+    if (IsMainWindowValid(pane) && host->splitPane == pane) {
+        return false;
+    }
+    if (path) {
+        LoadArgs args(path, host);
+        args.showWin = true;
+        args.noPlaceWindow = true;
+        LoadDocument(&args);
+        if (!IsMainWindowValid(host)) {
+            return false;
+        }
+        WindowTab* t = host->CurrentTab();
+        if (state && t && t->ctrl && path::IsSame(t->filePath, path)) {
+            SetTabState(t, state);
+        }
+        // put it back right of the left side
+        int leftIdx = left ? host->GetTabIdx(left) : -1;
+        if (t && leftIdx >= 0) {
+            while (host->GetTabIdx(t) > leftIdx + 1) {
+                MoveTab(host, -1);
+            }
+        }
+    }
+    if (selectLeft && IsMainWindowValid(host) && left && host->GetTabIdx(left) >= 0) {
+        TabsSelect(host, host->GetTabIdx(left));
+    }
+    return true;
+}
+
+// split view: is win the side that has (or last had) the keyboard focus
+bool SplitViewIsFocusedSide(MainWindow* win) {
+    if (!win) {
+        return false;
+    }
+    MainWindow* host = win->splitHost ? win->splitHost : win;
+    if (!IsSplitShowing(host)) {
+        return false;
+    }
+    bool isRight = (win == host->splitPane);
+    return isRight == host->splitRightFocused;
+}
+
+// follow the keyboard focus between the sides of a split view, so the
+// accent line shows where shortcuts (Ctrl+S, ...) go
+static void SplitViewTrackFocus() {
+    static HWND lastFocus = nullptr;
+    HWND focus = GetFocus();
+    if (focus == lastFocus) {
+        return;
+    }
+    lastFocus = focus;
+    MainWindow* win = focus ? FindMainWindowByHwnd(focus) : nullptr;
+    if (!win) {
+        return;
+    }
+    MainWindow* host = win->splitHost ? win->splitHost : win;
+    if (!host->splitPane) {
+        return;
+    }
+    bool isRight = (win == host->splitPane);
+    if (isRight == host->splitRightFocused) {
+        return;
+    }
+    host->splitRightFocused = isRight;
+    ToolbarRepaint(host);
+    ToolbarRepaint(host->splitPane);
+}
+
+static void OnSplitViewSplitterMove(VirtSplitter::MoveEvent* ev) {
+    MainWindow* win = FindMainWindowByHwnd(ev->w->GetHwnd());
+    if (!win) {
+        return;
+    }
+    Point pcur = HwndGetCursorPos(win->hwndFrame);
+    Rect rFrame = HwndClientRect(win->hwndFrame);
+    // keep in sync with RelayoutFrame
+    constexpr int kMinDocCanvasDx = 200;
+    int dx = rFrame.dx - pcur.x;
+    if (dx < kMinDocCanvasDx || dx > rFrame.dx - kMinDocCanvasDx) {
+        ev->resizeAllowed = false;
+        return;
+    }
+    if (ev->queryOnly) {
+        return;
+    }
+    if (ev->finishedDragging) {
+        win->splitDx = dx;
+        ScheduleUiUpdate(win);
     }
 }
 
@@ -7582,7 +8012,8 @@ static bool IsUiLayoutEq(UILayout* s1, UILayout* s2) {
            s1->tocVisible == s2->tocVisible && s1->showFavorites == s2->showFavorites &&
            s1->favoritesAsTab == s2->favoritesAsTab && s1->showMenuBarRebar == s2->showMenuBarRebar &&
            s1->aiChatVisible == s2->aiChatVisible && s1->aiChatDx == s2->aiChatDx &&
-           s1->sidebarOnRight == s2->sidebarOnRight;
+           s1->sidebarOnRight == s2->sidebarOnRight && s1->splitVisible == s2->splitVisible &&
+           s1->splitDx == s2->splitDx;
 }
 
 // Favorites-only must not reserve a tab row (issue #5861)
@@ -7607,13 +8038,13 @@ static void ClearSlotDefer(HwndSlot* slot) {
 // Keep x/width, apply the layout's y/height. Used on a live frame resize so
 // the sidebar is not nudged 1px when the caption-border inset changes.
 // A right sidebar follows the frame's right edge, so it takes x too (#6203).
-static void StretchHwndHeight(DeferWinPosHelper& dh, HWND hwnd, const Rect& want) {
+static void StretchHwndHeight(MainWindow* win, DeferWinPosHelper& dh, HWND hwnd, const Rect& want) {
     if (!hwnd) {
         return;
     }
     Rect cur = ChildPosWithinParent(hwnd);
     Rect next{cur.x, want.y, cur.dx, want.dy};
-    if (SidebarOnRightLayout()) {
+    if (SidebarOnRightLayout(win)) {
         next.x = want.x;
     }
     if (next != cur) {
@@ -7624,13 +8055,13 @@ static void StretchHwndHeight(DeferWinPosHelper& dh, HWND hwnd, const Rect& want
 // Keep x/y/height, apply a new width. Used on a live sidebar-splitter drag so
 // the TOC (label, filter, tree) is not nudged 1-2px; only the right edge moves.
 // A right sidebar's left edge is the one that moves (#6203).
-static void StretchHwndWidth(DeferWinPosHelper& dh, HWND hwnd, const Rect& want) {
+static void StretchHwndWidth(MainWindow* win, DeferWinPosHelper& dh, HWND hwnd, const Rect& want) {
     if (!hwnd) {
         return;
     }
     Rect cur = ChildPosWithinParent(hwnd);
     Rect next{cur.x, cur.y, want.dx, cur.dy};
-    if (SidebarOnRightLayout()) {
+    if (SidebarOnRightLayout(win)) {
         next.x = want.x;
     }
     if (next != cur) {
@@ -7739,7 +8170,9 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     curState.showMenuBarRebar = IsShowingMenuBarRebar(win);
     curState.aiChatVisible = win->uiState.aiChatVisible;
     curState.aiChatDx = win->aiChatDx;
-    curState.sidebarOnRight = SidebarOnRightLayout();
+    curState.sidebarOnRight = SidebarOnRightLayout(win);
+    curState.splitVisible = IsSplitShowing(win) && !win->presentation && !win->isFullScreen;
+    curState.splitDx = win->splitDx;
 
     // A top-level size change is already a live, batched sibling resize.
     // Toggling WM_SETREDRAW on the frame for every step makes Windows discard
@@ -7855,7 +8288,9 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     bool aiChatVisible = !favAsTab && win->uiState.aiChatVisible && win->hwndAiChatBox;
     bool showCaption = !win->presentation && !win->isFullScreen && win->tabsInTitlebar;
     bool showingMenuBar = IsShowingMenuBarRebar(win);
-    bool showTabsBar = !win->presentation && !win->isFullScreen && !win->tabsInTitlebar && win->tabsVisible;
+    // a split-view pane has no tab bar: the host shows a tab for it
+    bool showTabsBar =
+        !win->presentation && !win->isFullScreen && !win->tabsInTitlebar && win->tabsVisible && !win->splitHost;
     bool showMenuRebar = showingMenuBar && (!win->tabsInTitlebar || win->isFullScreen);
     bool showToolbar = win->isToolbarVisible;
     bool toolbarBottom = showToolbar && ToolbarAtBottom();
@@ -7908,7 +8343,7 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // 1px caption-border inset can disagree with the HWND's x. Only pin when
     // the sidebar is on the left: on the right, side.x is the right pane and
     // using it as rc.x stacked fav+canvas at the same x (issue-2165).
-    if ((isFrameResize || isSplitterDrag) && sidebarVisible && prevSidebar && !SidebarOnRightLayout()) {
+    if ((isFrameResize || isSplitterDrag) && sidebarVisible && prevSidebar && !SidebarOnRightLayout(win)) {
         HWND sideHwnd = tocVisible ? win->hwndTocBox : win->hwndFavBox;
         if (sideHwnd) {
             Rect side = ChildPosWithinParent(sideHwnd);
@@ -7953,6 +8388,16 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
         win->aiChatDx = aiChatDx;
     }
 
+    // split view: the pane takes the right part, below the tab bar / menu
+    bool splitVisible = curState.splitVisible;
+    int splitDxApplied = 0;
+    if (splitVisible) {
+        splitDxApplied = win->splitDx > 0 ? win->splitDx : rc.dx / 2;
+        int maxSplitDx = std::max(kMinDocCanvasDx, rc.dx - kMinDocCanvasDx);
+        splitDxApplied = limitValue(splitDxApplied, kMinDocCanvasDx, maxSplitDx);
+        win->splitDx = splitDxApplied;
+    }
+
     // sidebar favorites vs. the full-window Favorites tab: same HWND, one slot
     bool sidebarFav = !favAsTab && win->uiState.favVisible;
     SetVis(win->tocSlot, tocVisible);
@@ -7962,13 +8407,17 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     SetVis(win->sidebarSplitter, sidebarVisible);
     SetVis(win->aiChatSplitter, aiChatVisible);
     SetVis(win->aiChatSlot, aiChatVisible);
+    SetVis(win->splitSplitter, splitVisible);
+    SetVis(win->splitSlot, splitVisible);
+    win->splitSplitter->SetIsVisible(splitVisible);
+    win->splitSlot->dx = splitDxApplied;
 
     win->tocSlot->dx = sidebarDxApplied;
     win->tocSlot->dy = tocDy;
     win->favSlot->dx = sidebarDxApplied;
     win->aiChatSlot->dx = aiChatDx;
     if (win->frameLayout) {
-        win->frameLayout->rtl = SidebarOnRightLayout();
+        win->frameLayout->rtl = SidebarOnRightLayout(win);
     }
 
     // chrome HWNDs only move when updateToolbars (splitter drag skips them)
@@ -7988,6 +8437,7 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     BindSlot(win->fullFavSlot, win->hwndFavBox, &dh, favAsTab);
     BindSlot(win->canvasSlot, win->hwndCanvas, &dh, !discardCanvasBits);
     BindSlot(win->aiChatSlot, win->hwndAiChatBox, &dh, aiChatVisible);
+    BindSlot(win->splitSlot, win->splitPane ? win->splitPane->hwndFrame : nullptr, &dh, splitVisible);
 
     win->chromeLayout->Layout(Tight({rc.dx, rc.dy}));
     win->chromeLayout->SetBounds(rc);
@@ -7998,23 +8448,24 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     // Splitter drag: keep x/y/height, only stretch its width.
     if (isFrameResize) {
         if (tocVisible) {
-            StretchHwndHeight(dh, win->hwndTocBox, win->tocSlot->lastBounds);
+            StretchHwndHeight(win, dh, win->hwndTocBox, win->tocSlot->lastBounds);
         }
         if (sidebarFav) {
-            StretchHwndHeight(dh, win->hwndFavBox, win->favSlot->lastBounds);
+            StretchHwndHeight(win, dh, win->hwndFavBox, win->favSlot->lastBounds);
         }
     } else if (isSplitterDrag) {
         if (tocVisible) {
-            StretchHwndWidth(dh, win->hwndTocBox, win->tocSlot->lastBounds);
+            StretchHwndWidth(win, dh, win->hwndTocBox, win->tocSlot->lastBounds);
         }
         if (sidebarFav) {
-            StretchHwndWidth(dh, win->hwndFavBox, win->favSlot->lastBounds);
+            StretchHwndWidth(win, dh, win->hwndFavBox, win->favSlot->lastBounds);
         }
     }
 
     HwndSlot* chromeSlots[] = {win->tabsSlot,    win->menuSlot,    win->toolbarTopSlot, win->toolbarBottomSlot,
                                win->capMenuSlot, win->capTabsRow1, win->capTabsRow2,    win->tocSlot,
-                               win->favSlot,     win->fullFavSlot, win->canvasSlot,     win->aiChatSlot};
+                               win->favSlot,     win->fullFavSlot, win->canvasSlot,     win->aiChatSlot,
+                               win->splitSlot};
     for (HwndSlot* s : chromeSlots) {
         ClearSlotDefer(s);
     }
@@ -8043,6 +8494,13 @@ static bool RelayoutFrame(MainWindow* win, bool updateToolbars, int sidebarDx) {
     }
 
     dh.End();
+
+    if (win->splitPane) {
+        HwndSetVisible(win->splitPane->hwndFrame, splitVisible);
+        if (splitVisible) {
+            win->splitSplitter->Invalidate();
+        }
+    }
 
     if (isSplitterDrag) {
         if (discardCanvasBits) {
@@ -9901,7 +10359,7 @@ static void OnSidebarSplitterMove(VirtSplitter::MoveEvent* ev) {
     Point pcur = HwndGetCursorPos(win->hwndFrame);
     Rect rFrame = HwndClientRect(win->hwndFrame);
     int sidebarDx = pcur.x; // without splitter
-    if (SidebarOnRightLayout()) {
+    if (SidebarOnRightLayout(win)) {
         sidebarDx = rFrame.dx - pcur.x;
     }
 
@@ -9974,6 +10432,9 @@ static bool FrameCanResizeForSidebar(MainWindow* win) {
     if (!win || !win->hwndFrame || gPluginMode) {
         return false;
     }
+    if (win->splitHost || win->splitPane) {
+        return false;
+    }
     if (!str::EqI(gSettings->sidebarWindowSize, StrL("grow"))) {
         return false;
     }
@@ -10009,7 +10470,7 @@ static void AdjustFrameForSidebar(MainWindow* win, bool show) {
     HWND hwnd = win->hwndFrame;
     Rect wr = HwndWindowRect(hwnd);
     Rect work = GetWorkAreaRect(wr, hwnd);
-    bool onRight = SidebarOnRightLayout();
+    bool onRight = SidebarOnRightLayout(win);
 
     if (show) {
         if (win->sidebarGrewFrameDx > 0) {
@@ -10418,6 +10879,10 @@ static bool IsMarkdownTab(WindowTab* tab) {
 // returns the surviving window (with no documents)
 static MainWindow* CollectPathsAndCloseWindows(StrVec& paths) {
     for (MainWindow* w : gWindows) {
+        // a split-view pane's document is collected via its host's tab
+        if (w->splitHost) {
+            continue;
+        }
         for (WindowTab* tab : w->Tabs()) {
             if (tab->IsAboutTab() || len(tab->filePath) == 0) {
                 continue;
@@ -10433,7 +10898,7 @@ static MainWindow* CollectPathsAndCloseWindows(StrVec& paths) {
     // close all windows except the last; use quitIfLast=false to keep it alive
     Vec<MainWindow*> toClose(gWindows);
     for (MainWindow* w : toClose) {
-        if (!CanCloseWindow(w)) {
+        if (!IsMainWindowValid(w) || w->splitHost || !CanCloseWindow(w)) {
             continue;
         }
         CloseWindow(w, false, false);
@@ -10561,7 +11026,7 @@ static void TransitionToTabs() {
 // (unlike ToggleMenuBar, which flips the pref). No-op in fullscreen /
 // presentation, where the menu bar is governed by that mode.
 static void ApplyMenuBarVisibility(MainWindow* win) {
-    if (!win->menu || win->presentation || win->isFullScreen) {
+    if (!win->menu || win->splitHost || win->presentation || win->isFullScreen) {
         return;
     }
     bool visible = IsMenubarVisible();
@@ -12452,6 +12917,14 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
                 RunCommandPalette(win, Str(kPalettePrefixTabs), advance);
             }
         } break;
+
+        case CmdSplitWithCurrentTab:
+            SplitViewStartDefault(win);
+            break;
+
+        case CmdCloseSplitView:
+            SplitViewEnd(win->splitHost ? win->splitHost : win, true, true);
+            break;
 
         case CmdMoveTabRight:
         case CmdMoveTabLeft: {
@@ -15036,13 +15509,18 @@ static void ApplyEmbeddedWindowChrome(MainWindow* win) {
 static LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     DpiScope dpiScope(hwnd);
     MainWindow* win = FindMainWindowByHwnd(hwnd);
+    // a split-view pane's frame is inside its host's: after the pane is
+    // deleted its messages would otherwise go to the host
+    if (win && win->hwndFrame != hwnd) {
+        win = nullptr;
+    }
 
     // DbgLogMsg("frame:", hwnd, msg, wp, lp);
     // detect when an external host (e.g. Total Commander's lister) embeds us
     // by reparenting our window as WS_CHILD. Only set the flag here and post
     // chrome teardown: this handler can re-enter under EndDeferWindowPos.
     bool isChildWindow = HwndIsWindowStyleSet(hwnd, WS_CHILD);
-    if (win && !gMyWindowWasEmbedded && isChildWindow) {
+    if (win && !win->splitHost && !gMyWindowWasEmbedded && isChildWindow) {
         logf("Detected window embedded in another window\n");
         gMyWindowWasEmbedded = true;
         uitask::Post(MkFunc0(ApplyEmbeddedWindowChrome, win), "ApplyEmbeddedWindowChrome");
@@ -16512,6 +16990,7 @@ static int RunMessageLoop() {
         }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
+        SplitViewTrackFocus();
         ResetTempArenaWithLogging();
     }
 

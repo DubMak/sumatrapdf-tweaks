@@ -339,6 +339,8 @@ const commandsRaw = [
     "CmdSignWithImage", "Sign With Image",
     "CmdInsertTextSnippet", "Insert Text Snippet",
     "CmdSave", "Save",
+    "CmdSplitWithCurrentTab", "Split With Current Tab",
+    "CmdCloseSplitView", "Close Split View",
 ];
 
 // removed slots are dropped: nothing outside the generators should see them

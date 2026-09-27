@@ -179,3 +179,4 @@ void ToolbarFocusFrame(MainWindow*);
 bool ToolbarFrameIsVisible(MainWindow*);
 void ToolbarPostCommand(MainWindow*, int cmdId);
 void ToolbarSetHeight(MainWindow*, int dy);
+void ToolbarRepaint(MainWindow*);

@@ -27,3 +27,4 @@ void CollectTabsToClose(MainWindow* win, WindowTab* currTab, Vec<WindowTab*>& to
 void CloseAllTabs(MainWindow*);
 void CloseCollectedTabs(MainWindow* win, const Vec<WindowTab*>& toClose);
 void MoveTab(MainWindow* win, int dir);
+void InsertSplitPeerTab(MainWindow* win, WindowTab* tab, int idx, WindowTab* pairedWith);

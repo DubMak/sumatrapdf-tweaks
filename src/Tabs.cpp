@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 #include "base/Base.h"
+#include "base/UITask.h"
 #include "gui/Dpi.h"
 #include "base/File.h"
 #include "base/Win.h"
@@ -257,6 +258,17 @@ static void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin, Point releasePt)
     if (tab->IsNonDocumentTab()) {
         return;
     }
+    // the split-view stand-in tab has no document of its own
+    if (tab == oldWin->splitPeerTab) {
+        return;
+    }
+    // dropped on a split-view pane: goes to its window
+    if (newWin && newWin->splitHost) {
+        newWin = newWin->splitHost;
+    }
+    if (newWin == oldWin) {
+        return;
+    }
 
     // don't migrate if it's only one document tab and not
     // dragging over a window
@@ -270,6 +282,14 @@ static void MaybeMigrateTab(WindowTab* tab, MainWindow* newWin, Point releasePt)
     auto* engine = tab->GetEngine();
     if (EngineHasUnsavedAnnotations(engine)) {
         return;
+    }
+    if (oldWin->splitPane && tab == oldWin->splitLeftTab) {
+        if (!SplitViewEnd(oldWin, true, false)) {
+            return;
+        }
+        if (!IsMainWindowValidAndNotClosing(oldWin) || oldWin->GetTabIdx(tab) < 0) {
+            return;
+        }
     }
 
     RemoveTab(tab);
@@ -343,6 +363,14 @@ void TabsSelect(MainWindow* win, int tabIndex) {
         tabIndex = 0;
         logf("TabsSelect: fixing tabIndex to 0\n");
     }
+    // the split-view stand-in tab: show the left side, focus the pane
+    if (tabs[tabIndex] == win->splitPeerTab && win->splitLeftTab) {
+        int leftIdx = win->GetTabIdx(win->splitLeftTab);
+        if (leftIdx >= 0) {
+            tabIndex = leftIdx;
+            uitask::Post(MkFunc0(SplitViewFocusPane, win), "SplitViewFocusPane");
+        }
+    }
     TabsCtrl* tabsCtrl = win->tabsCtrl;
     int currIdx = tabsCtrl->GetSelected();
     if (tabIndex == currIdx) {
@@ -398,6 +426,14 @@ static MenuDef menuDefContextTab[] = {
     {
         TrN("Open In New Window"),
         CmdDuplicateInNewWindow,
+    },
+    {
+        TrN("Split With Current Tab"),
+        CmdSplitWithCurrentTab,
+    },
+    {
+        TrN("Close Split View"),
+        CmdCloseSplitView,
     },
     {
         TrN("Change Tab Color"),
@@ -476,6 +512,15 @@ void CloseCollectedTabs(MainWindow* win, const Vec<WindowTab*>& toClose) {
     if (!win) {
         return;
     }
+    // the split view goes first: closing its left side would re-open the
+    // pane's document as a new tab
+    if (win->splitPane && VecContains(toClose, win->splitPeerTab)) {
+        MainWindow* pane = win->splitPane;
+        CloseWindow(pane, false, false);
+        if (!IsMainWindowValid(win) || win->splitPane == pane) {
+            return;
+        }
+    }
     for (WindowTab* t : toClose) {
         if (!IsMainWindowValid(win) || win->isBeingClosed) {
             return;
@@ -533,6 +578,23 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
     }
     Point pt = HwndClientToScreen(tabsCtrl->hwnd, ev->ptWindow);
 
+    // the split-view stand-in tab: its document lives in the pane
+    if (tabUnderMouse == win->splitPeerTab && win->splitPane) {
+        HMENU popup = CreatePopupMenu();
+        AppendMenuW(popup, MF_STRING, CmdCloseSplitView, ToWStrTemp(Tr("Close Split View")).s);
+        AppendMenuW(popup, MF_STRING, CmdClose, ToWStrTemp(Tr("Close")).s);
+        MarkMenuOwnerDraw(popup);
+        int cmd = TrackPopupMenu(popup, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, win->hwndFrame, nullptr);
+        FreeMenuOwnerDrawInfoData(popup);
+        DestroyMenu(popup);
+        if (cmd == CmdCloseSplitView) {
+            SplitViewEnd(win, true, true);
+        } else if (cmd == CmdClose) {
+            CloseTab(tabUnderMouse, false);
+        }
+        return;
+    }
+
     Vec<WindowTab*> toCloseOther;
     Vec<WindowTab*> toCloseRight;
     Vec<WindowTab*> toCloseLeft;
@@ -560,6 +622,19 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
 
     if (!tabUnderMouse->ctrl) {
         MenuSetEnabled(popup, CmdSetTabColor, false);
+    }
+    // split view: "Close" on its left side, "Split" on another document tab
+    {
+        WindowTab* cur = win->CurrentTab();
+        bool isSplitLeft = win->splitPane && tabUnderMouse == win->splitLeftTab;
+        bool canSplit = !isSplitLeft && cur && cur != tabUnderMouse && !cur->IsNonDocumentTab() && cur->ctrl &&
+                        !tabUnderMouse->IsNonDocumentTab() && !EngineHasUnsavedAnnotations(tabEngine);
+        if (!isSplitLeft) {
+            DeleteMenu(popup, CmdCloseSplitView, MF_BYCOMMAND);
+        }
+        if (!canSplit) {
+            DeleteMenu(popup, CmdSplitWithCurrentTab, MF_BYCOMMAND);
+        }
     }
     // the save/discard items only make sense when the document has unsaved
     // changes (e.g. filled form fields, added annotations); otherwise remove
@@ -609,6 +684,14 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
             DuplicateTabInNewWindow(tabUnderMouse);
             return;
         }
+        case CmdSplitWithCurrentTab: {
+            SplitViewStart(win, tabUnderMouse);
+            return;
+        }
+        case CmdCloseSplitView: {
+            SplitViewEnd(win, true, true);
+            return;
+        }
         case CmdProperties: {
             ShowProperties(win->hwndFrame, tabUnderMouse->ctrl);
             return;
@@ -645,6 +728,13 @@ static void MainWindowTabClosed(MainWindow* win, TabsCtrl::ClosedEvent* ev) {
 }
 
 static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionChangingEvent* ev) {
+    // the split-view stand-in tab is never selected: a click focuses the pane
+    WindowTab* target = (ev->tabIdx >= 0 && ev->tabIdx < win->TabCount()) ? win->GetTab(ev->tabIdx) : nullptr;
+    if (target && target == win->splitPeerTab) {
+        ev->preventChanging = true;
+        uitask::Post(MkFunc0(SplitViewFocusPane, win), "SplitViewFocusPane");
+        return;
+    }
     // TODO: Should we allow the switch of the tab if we are in process of printing?
     SaveCurrentWindowTab(win);
     ev->preventChanging = false;
@@ -924,6 +1014,10 @@ void TabsOnCloseWindow(MainWindow* win) {
 }
 
 void SetTabsInTitlebar(MainWindow* win, bool inTitleBar) {
+    // a split-view pane has no caption
+    if (win->splitHost) {
+        inTitleBar = false;
+    }
     if (inTitleBar == win->tabsInTitlebar) {
         return;
     }
@@ -945,13 +1039,33 @@ void TabsOnCtrlTab(MainWindow* win, bool reverse) {
     if (count < 2) {
         return;
     }
-    int idx = win->tabsCtrl->GetSelected() + 1;
-    if (reverse) {
-        idx -= 2;
+    int step = reverse ? -1 : 1;
+    int idx = (win->tabsCtrl->GetSelected() + step + count) % count;
+    // the split-view stand-in tab is skipped (it's shown with its left side)
+    if (win->GetTab(idx) == win->splitPeerTab) {
+        idx = (idx + step + count) % count;
     }
-    idx += count; // ensure > 0
-    idx = idx % count;
     TabsSelect(win, idx);
+}
+
+// the split-view stand-in tab for win's pane, painted as selected together
+// with pairedWith. Keeps the current selection
+void InsertSplitPeerTab(MainWindow* win, WindowTab* tab, int idx, WindowTab* pairedWith) {
+    auto* tabs = win->tabsCtrl;
+    int selIdx = tabs->GetSelected();
+    tab->canvasRc = win->canvasRc;
+    TabInfo* ti = new TabInfo();
+    ti->text = str::Dup(tab->GetTabTitle());
+    ti->tooltip = str::Dup(MakeTabTooltipTemp(tab->filePath, false));
+    ti->userData = (UINT_PTR)tab;
+    ti->pairedWith = (UINT_PTR)pairedWith;
+    ti->tabColor = tab->tabColor;
+    int insertedIdx = tabs->InsertTab(idx, ti, true);
+    if (selIdx >= insertedIdx) {
+        selIdx++;
+    }
+    tabs->SetSelected(selIdx);
+    UpdateTabWidth(win);
 }
 
 void MoveTab(MainWindow* win, int dir) {

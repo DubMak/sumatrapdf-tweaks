@@ -345,6 +345,22 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
     // horizontal splitter for resizing favorites and bookmars parts
     VirtSplitter* favSplitter = nullptr;
 
+    // split view: a second document shown right of this window's current
+    // tab. The pane is a MainWindow of its own (canvas, sidebar, toolbar),
+    // embedded as a child of this frame
+    MainWindow* splitPane = nullptr;
+    // on the pane: the window it's embedded in
+    MainWindow* splitHost = nullptr;
+    // the host's tab the pane is shown next to
+    WindowTab* splitLeftTab = nullptr;
+    // the host's stand-in tab for the pane's document, right of splitLeftTab
+    WindowTab* splitPeerTab = nullptr;
+    // width of the pane; 0 until first laid out (then half the frame)
+    int splitDx = 0;
+    bool splitRightFocused = false;
+    VirtSplitter* splitSplitter = nullptr;
+    HwndSlot* splitSlot = nullptr;
+
     TabsCtrl* tabsCtrl = nullptr;
     bool tabsVisible = false;
     bool tabsInTitlebar = false;
@@ -563,6 +579,8 @@ struct MainWindow { // NOLINT(clang-analyzer-optin.performance.Padding)
             bool aiChatVisible = false;
             int aiChatDx = 0;
             bool sidebarOnRight = false;
+            bool splitVisible = false;
+            int splitDx = 0;
         };
         Layout layout;    // last applied layout state
         Rect lastFrameRc; // previous frame client size; a change skips WM_SETREDRAW

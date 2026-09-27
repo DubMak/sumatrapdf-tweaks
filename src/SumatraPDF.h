@@ -157,6 +157,11 @@ WindowTab* FindTabByFilePath(Str path);
 WindowTab* FindTabByController(DocController*);
 bool CanCloseWindow(MainWindow* win);
 void CloseWindow(MainWindow* win, bool quitIfLast, bool forceClose);
+void SplitViewStart(MainWindow* host, WindowTab* peer);
+void SplitViewStartDefault(MainWindow* win);
+bool SplitViewEnd(MainWindow* host, bool reopenPeer, bool selectLeft);
+void SplitViewFocusPane(MainWindow* host);
+bool SplitViewIsFocusedSide(MainWindow* win);
 void PostAppExit();
 enum class SidebarResizeFrame {
     Keep,

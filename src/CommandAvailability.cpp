@@ -574,6 +574,15 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     if (cmdId == CmdGoToHomePage) {
         return SettingsUseTabs() ? CommandVisibility::Show : CommandVisibility::Hide;
     }
+    if (cmdId == CmdSplitWithCurrentTab || cmdId == CmdCloseSplitView) {
+        MainWindow* w = ctx.tab ? ctx.tab->win : nullptr;
+        MainWindow* host = (w && w->splitHost) ? w->splitHost : w;
+        bool isSplit = host && host->splitPane;
+        if (cmdId == CmdCloseSplitView) {
+            return isSplit ? CommandVisibility::Show : CommandVisibility::Hide;
+        }
+        return (SettingsUseTabs() && ctx.nTabs >= 2) ? CommandVisibility::Show : CommandVisibility::Hide;
+    }
     if (cmdId == CmdNextTab || cmdId == CmdPrevTab || cmdId == CmdNextTabSmart || cmdId == CmdPrevTabSmart ||
         cmdId == CmdMoveTabLeft || cmdId == CmdMoveTabRight) {
         return ctx.nTabs >= 2 ? CommandVisibility::Show : CommandVisibility::Hide;

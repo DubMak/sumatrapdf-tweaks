@@ -481,6 +481,10 @@ static TabState* FindSessionTabState(Str fp) {
 static void RefreshLazyTabStatePointers() {
     int sdIdx = 0;
     for (MainWindow* win : gWindows) {
+        // a split-view pane is saved as its host's tab
+        if (win->splitHost) {
+            continue;
+        }
         bool hasFileTab = false;
         for (WindowTab* tab : win->Tabs()) {
             if (tab->filePath) {
@@ -537,7 +541,8 @@ static void RememberSessionState() {
     }
 
     for (auto* win : gWindows) {
-        if (win->isQuickLook) {
+        // a split-view pane is saved as its host's tab
+        if (win->isQuickLook || win->splitHost) {
             continue;
         }
         SessionData* windowState = NewSessionData();
@@ -545,6 +550,13 @@ static void RememberSessionState() {
             if (len(tab->filePath) == 0) {
                 // home page tab
                 continue;
+            }
+            // split view: the stand-in tab's document is in the pane
+            if (tab == win->splitPeerTab && win->splitPane && win->splitPane->CurrentTab()) {
+                WindowTab* paneTab = win->splitPane->CurrentTab();
+                if (len(paneTab->filePath) > 0) {
+                    tab = paneTab;
+                }
             }
             Str fp = tab->filePath;
             if (!tab->ctrl) {
