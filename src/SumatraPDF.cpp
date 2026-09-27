@@ -1669,6 +1669,11 @@ bool ToolbarAtBottom() {
     return ToolbarPositionFromPrefs() == kToolbarBottom;
 }
 
+// the top-level frame: the host for a split pane, else win itself
+static MainWindow* SplitViewHostOf(MainWindow* win) {
+    return (win && win->splitHost) ? win->splitHost : win;
+}
+
 // split view is up: the host shows its current tab (the left side) with the
 // pane next to it
 static bool IsSplitShowing(MainWindow* win) {
@@ -12902,11 +12907,13 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         case CmdNextTab:
         case CmdPrevTab: {
             bool reverse = cmdId == CmdPrevTab;
-            TabsOnCtrlTab(win, reverse);
+            TabsOnCtrlTab(SplitViewHostOf(win), reverse);
         } break;
 
         case CmdNextTabSmart:
         case CmdPrevTabSmart: {
+            // the right split side is a child window with one tab; switch the frame's tabs
+            win = SplitViewHostOf(win);
             if (gSettings->ctrlTabSimple) {
                 // simple (pre-3.6) behavior: switch tabs immediately, in tab-strip order
                 TabsOnCtrlTab(win, cmdId == CmdPrevTabSmart);

@@ -585,7 +585,10 @@ CommandVisibility GetCommandVisibility(int cmdId, const AppCommandCtx& ctx, Comm
     }
     if (cmdId == CmdNextTab || cmdId == CmdPrevTab || cmdId == CmdNextTabSmart || cmdId == CmdPrevTabSmart ||
         cmdId == CmdMoveTabLeft || cmdId == CmdMoveTabRight) {
-        return ctx.nTabs >= 2 ? CommandVisibility::Show : CommandVisibility::Hide;
+        MainWindow* w = ctx.tab ? ctx.tab->win : ctx.win;
+        MainWindow* host = (w && w->splitHost) ? w->splitHost : w;
+        int nTabs = host ? host->TabCount() : ctx.nTabs;
+        return nTabs >= 2 ? CommandVisibility::Show : CommandVisibility::Hide;
     }
     if ((cmdId == CmdToggleWindowsPreviewer || cmdId == CmdToggleWindowsSearchFilter) && !IsOurExeInstalled()) {
         return CommandVisibility::Hide;
