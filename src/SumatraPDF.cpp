@@ -12363,9 +12363,9 @@ bool CanMovePagesInTab(WindowTab* tab) {
     return EngineMupdfCanMovePages(dm->GetEngine());
 }
 
-// move page fromPageNo in front of the page now at toSlot (pageCount + 1 for
-// the end); one undo step
-void MovePageInTab(WindowTab* tab, int fromPageNo, int toSlot) {
+// move pages (ascending) in front of the page now at toSlot (pageCount + 1
+// for the end), keeping their order; one undo step
+void MovePagesInTab(WindowTab* tab, const Vec<int>& pages, int toSlot) {
     if (!CanMovePagesInTab(tab)) {
         return;
     }
@@ -12377,11 +12377,17 @@ void MovePageInTab(WindowTab* tab, int fromPageNo, int toSlot) {
     if (gRenderCache) {
         gRenderCache->AbortRendering(dm);
     }
-    if (!EngineMupdfMovePage(dm->GetEngine(), fromPageNo, toSlot)) {
+    if (!EngineMupdfMovePages(dm->GetEngine(), pages, toSlot)) {
         ShowWarningNotification(win->hwndCanvas, Tr("Couldn't move the page"), kNotif5SecsTimeOut);
         return;
     }
-    int newPageNo = toSlot <= fromPageNo ? toSlot : toSlot - 1;
+    // the first moved page lands after the ones that were in front of toSlot
+    int newPageNo = toSlot;
+    for (int pageNo : pages) {
+        if (pageNo < toSlot) {
+            newPageNo--;
+        }
+    }
     ApplyPageReorder(tab, newPageNo);
 }
 
@@ -12420,9 +12426,10 @@ void InsertPdfsInTab(WindowTab* tab, const StrVec& paths, int toSlot) {
     }
 }
 
-// copy page pageNo of src (with its unsaved edits) in front of the page now
-// at toSlot in dst; one undo step. Used by dragging thumbnails across split view
-void InsertPageFromTab(WindowTab* dst, WindowTab* src, int pageNo, int toSlot) {
+// copy pages of src (with its unsaved edits) in front of the page now at
+// toSlot in dst, in that order; one undo step. Used by dragging thumbnails
+// across split view
+void InsertPagesFromTab(WindowTab* dst, WindowTab* src, const Vec<int>& pages, int toSlot) {
     DisplayModel* srcDm = src ? src->AsFixed() : nullptr;
     if (!srcDm || !CanInsertPagesInTab(dst)) {
         return;
@@ -12440,7 +12447,7 @@ void InsertPageFromTab(WindowTab* dst, WindowTab* src, int pageNo, int toSlot) {
     TempStr tmpPath = GetTempFilePathTemp(StrL("SumPg"));
     int n = 0;
     if (tmpPath && EngineMupdfSaveCopy(srcDm->GetEngine(), tmpPath)) {
-        n = EngineMupdfInsertPdf(dm->GetEngine(), CStrTemp(tmpPath), toSlot, pageNo, 1);
+        n = EngineMupdfInsertPdf(dm->GetEngine(), CStrTemp(tmpPath), toSlot, &pages);
     }
     if (tmpPath) {
         file::Delete(tmpPath);

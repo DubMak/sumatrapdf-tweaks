@@ -366,6 +366,16 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     bool fileDrop = false;
     // split view: the other side's thumbnails the dragged page would be copied to
     ThumbnailPaletteCtrl* peerDrop = nullptr;
+    // sidebar: pages picked with Ctrl / Shift click (ascending, 2 or more);
+    // empty when only selectedPage is selected
+    Vec<int> selPages;
+    // where a Shift click range starts (0: selectedPage)
+    int anchorPage = 0;
+    // the pages being dragged (ascending): the selection or just pressPage
+    Vec<int> dragPages;
+    // pressed a page of a multi-page selection without Ctrl / Shift: on release
+    // it becomes the only selected page, unless the selection was dragged
+    bool pressInSelection = false;
 
     ThumbnailPaletteCtrl(MainWindow*, PlatformFont*, int dpi, bool sidebarMode = false);
     ~ThumbnailPaletteCtrl() override;
@@ -391,8 +401,12 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void BeginFileDrop();
     void UpdateDrop(Point pt);
     void EndPageDrag();
+    void SelectPages(int firstPage, int n);
 
   private:
+    bool IsPageSelected(int pageNo) const;
+    void ClearMultiSelection();
+    void PickPage(int pageNo, bool toggle, bool range);
     void StartDragTimer();
     void StopDragTimer();
     void MoveGhost(Point ptWindow);
@@ -408,6 +422,16 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void SelectPage(int);
     void OpenSelectedPage();
 };
+
+// dropping a contiguous run of pages (ascending) in front of one of them or
+// right after the last doesn't move anything
+static bool IsDropNextToItself(const Vec<int>& pages, int slot) {
+    int n = len(pages);
+    if (n == 0 || pages[n - 1] - pages[0] != n - 1) {
+        return false;
+    }
+    return slot >= pages[0] && slot <= pages[n - 1] + 1;
+}
 
 // auto-scrolls the sidebar while a page is dragged near its edge
 constexpr UINT_PTR kThumbDragTimerId = 0x7d47;
@@ -446,6 +470,27 @@ static void PaintThumbGhost(HWND hwnd) {
     for (int i = 0; i < 2; i++) {
         RECT r{i, i, rc.right - i, rc.bottom - i};
         FrameRect(hdc, &r, accent);
+    }
+    // several pages: how many, in a badge in the top right corner
+    int nPages = ctrl ? len(ctrl->dragPages) : 0;
+    if (nPages > 1) {
+        int fontDy = std::max(14, (int)rc.bottom / 9);
+        HFONT font =
+            CreateFontW(-fontDy, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HGDIOBJ oldFont = SelectObject(hdc, font);
+        WCHAR text[16];
+        wsprintfW(text, L"%d", nPages);
+        SIZE ts{};
+        GetTextExtentPoint32W(hdc, text, lstrlenW(text), &ts);
+        int pad = fontDy / 3;
+        int boxDx = std::max((int)ts.cx + (pad * 2), (int)ts.cy + pad);
+        RECT box{rc.right - boxDx - 4, 4, rc.right - 4, 4 + ts.cy + pad};
+        FillRect(hdc, &box, accent);
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(255, 255, 255));
+        DrawTextW(hdc, text, -1, &box, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, oldFont);
+        DeleteObject(font);
     }
     DeleteObject(accent);
     EndPaint(hwnd, &ps);
@@ -638,6 +683,8 @@ void ThumbnailPaletteCtrl::InitForCurrentTab() {
     madeForDm = tab ? tab->AsFixed() : nullptr;
     pageCount = madeForDm ? madeForDm->PageCount() : 0;
     selectedPage = madeForDm ? Clamp(madeForDm->CurrentPageNo(), 1, std::max(pageCount, 1)) : 1;
+    VecClear(selPages);
+    anchorPage = 0;
 
     rowsModel->rows = (pageCount + cols - 1) / cols;
     SetModel(rowsModel);
@@ -788,7 +835,7 @@ void ThumbnailPaletteCtrl::DrawRow(DrawItemEvent* ev) {
             ev->gfx->DrawPixmap(thumbnail, target);
         }
 
-        if (pageNo == selectedPage) {
+        if (IsPageSelected(pageNo)) {
             ev->gfx->DrawRect(pageRect, MkRgb(0, 120, 215), 3);
         } else {
             // soft outline so white pages stand out from the background
@@ -868,6 +915,81 @@ void ThumbnailPaletteCtrl::SelectPage(int pageNo) {
     StartRendering();
 }
 
+bool ThumbnailPaletteCtrl::IsPageSelected(int pageNo) const {
+    if (len(selPages) > 0) {
+        return VecContains(selPages, pageNo);
+    }
+    return pageNo == selectedPage;
+}
+
+void ThumbnailPaletteCtrl::ClearMultiSelection() {
+    anchorPage = 0;
+    if (len(selPages) == 0) {
+        return;
+    }
+    VecClear(selPages);
+    Invalidate();
+}
+
+// Ctrl click (toggle) adds or removes a page, Shift click (range) selects the
+// pages from the anchor to it, Ctrl+Shift click adds them. Neither goes to the
+// page, so the document stays where it is
+void ThumbnailPaletteCtrl::PickPage(int pageNo, bool toggle, bool range) {
+    Vec<int> sel;
+    if (len(selPages) > 0) {
+        VecAppendVec(sel, selPages);
+    } else {
+        VecAppend(sel, selectedPage);
+    }
+    if (range) {
+        if (anchorPage <= 0 || anchorPage > pageCount) {
+            anchorPage = selectedPage;
+        }
+        if (!toggle) {
+            VecClear(sel);
+        }
+        int first = std::min(anchorPage, pageNo);
+        int last = std::max(anchorPage, pageNo);
+        for (int p = first; p <= last; p++) {
+            if (!VecContains(sel, p)) {
+                VecAppend(sel, p);
+            }
+        }
+    } else {
+        int idx = VecFind(sel, pageNo);
+        if (idx < 0) {
+            VecAppend(sel, pageNo);
+        } else if (len(sel) > 1) {
+            // the last selected page stays: something is always selected
+            VecRemoveAt(sel, idx);
+        }
+        anchorPage = pageNo;
+    }
+    std::sort(sel.begin(), sel.end());
+    VecClear(selPages);
+    if (len(sel) > 1) {
+        VecAppendVec(selPages, sel);
+    }
+    selectedPage = VecContains(sel, pageNo) ? pageNo : sel[0];
+    EnsureVisible((pageNo - 1) / cols);
+    Invalidate();
+    StartRendering();
+}
+
+// select n pages starting at firstPage, e.g. the ones just copied here
+void ThumbnailPaletteCtrl::SelectPages(int firstPage, int n) {
+    if (firstPage < 1 || n < 1 || firstPage + n - 1 > pageCount) {
+        return;
+    }
+    VecClear(selPages);
+    for (int i = 0; n > 1 && i < n; i++) {
+        VecAppend(selPages, firstPage + i);
+    }
+    anchorPage = firstPage;
+    selectedPage = firstPage;
+    Invalidate();
+}
+
 void ThumbnailPaletteCtrl::OpenSelectedPage() {
     if (!win || !tab || win->CurrentTab() != tab) {
         return;
@@ -885,14 +1007,32 @@ void ThumbnailPaletteCtrl::OpenSelectedPage() {
 void ThumbnailPaletteCtrl::OnThumbMouseDown(VirtMouseEvent* ev) {
     int pageNo = PageAtPoint(ev->pt);
     if (pageNo > 0) {
-        SelectPage(pageNo);
+        bool leftButton = sidebarMode && ev->button == 0;
+        bool pick = leftButton && (ev->isCtrl || ev->isShift);
+        bool inSelection = leftButton && !pick && len(selPages) > 0 && VecContains(selPages, pageNo);
+        if (pick) {
+            PickPage(pageNo, ev->isCtrl, ev->isShift);
+        } else if (!inSelection) {
+            ClearMultiSelection();
+            SelectPage(pageNo);
+            if (sidebarMode) {
+                OpenSelectedPage();
+            }
+        }
         if (sidebarMode) {
-            OpenSelectedPage();
-            // hold the mouse: moving it past the drag threshold picks the page up
+            // hold the mouse: moving it past the drag threshold picks the
+            // page (or all selected pages) up
             int left = 0;
             int top0 = 0;
-            if (root && ev->button == 0 && CanMovePagesInTab(tab) && GridOrigin(left, top0)) {
+            if (root && leftButton && IsPageSelected(pageNo) && CanMovePagesInTab(tab) && GridOrigin(left, top0)) {
                 pressPage = pageNo;
+                VecClear(dragPages);
+                if (len(selPages) > 0) {
+                    VecAppendVec(dragPages, selPages);
+                } else {
+                    VecAppend(dragPages, pageNo);
+                }
+                pressInSelection = inSelection;
                 pressPt = ev->ptWindow;
                 Rect r = PageRectInWindow(pageNo, left, top0);
                 grabOffset = {pressPt.x - r.x, pressPt.y - r.y};
@@ -944,16 +1084,29 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
 void ThumbnailPaletteCtrl::OnThumbMouseUp(VirtMouseEvent* ev) {
     if (pressPage > 0) {
         int fromPage = pressPage;
+        bool clicked = !dragging;
+        bool clickedInSelection = pressInSelection;
+        Vec<int> pages;
+        VecAppendVec(pages, dragPages);
         ThumbnailPaletteCtrl* peer = peerDrop;
         WindowTab* peerTab = peer ? peer->win->CurrentTab() : nullptr;
         int slot = peer ? peer->dropSlot : (dragging ? dropSlot : 0);
         EndPageDrag();
-        if (peer) {
+        if (clicked && clickedInSelection) {
+            // a plain click on a selected page, not a drag: select only it
+            ClearMultiSelection();
+            SelectPage(fromPage);
+            OpenSelectedPage();
+        } else if (peer) {
             if (slot > 0) {
-                InsertPageFromTab(peerTab, tab, fromPage, slot);
+                int oldCount = peer->pageCount;
+                InsertPagesFromTab(peerTab, tab, pages, slot);
+                if (peer->pageCount == oldCount + len(pages)) {
+                    peer->SelectPages(slot, len(pages));
+                }
             }
-        } else if (slot > 0 && slot != fromPage && slot != fromPage + 1) {
-            MovePageInTab(tab, fromPage, slot);
+        } else if (slot > 0 && !IsDropNextToItself(pages, slot)) {
+            MovePagesInTab(tab, pages, slot);
         }
         ev->didHandle = true;
         return;
@@ -974,6 +1127,12 @@ void ThumbnailPaletteCtrl::OnThumbDoubleClick(VirtMouseEvent* ev) {
     if (pageNo <= 0) {
         return;
     }
+    if (sidebarMode && (ev->isCtrl || ev->isShift)) {
+        // the second click of a quick Ctrl / Shift pick: unhandled, it
+        // becomes another press
+        return;
+    }
+    ClearMultiSelection();
     SelectPage(pageNo);
     OpenSelectedPage();
     ev->didHandle = true;
@@ -1016,6 +1175,7 @@ void ThumbnailPaletteCtrl::HandleKey(int vkey) {
         default:
             return;
     }
+    ClearMultiSelection();
     SelectPage(Clamp(pageNo, 1, pageCount));
 }
 
@@ -1181,7 +1341,7 @@ void ThumbnailPaletteCtrl::UpdateDrop(Point pt) {
         dropLine = {lineX - (lineDx / 2), top0 + (row * itemDy), lineDx, thumbDy};
     }
     // dropping next to itself doesn't move it
-    if (pressPage > 0 && (dropSlot == pressPage || dropSlot == pressPage + 1)) {
+    if (pressPage > 0 && IsDropNextToItself(dragPages, dropSlot)) {
         dropLine = {};
     }
     Invalidate();
@@ -1323,6 +1483,8 @@ void ThumbnailPaletteCtrl::EndPageDrag() {
     }
     bool wasDragging = dragging || fileDrop;
     pressPage = 0;
+    VecClear(dragPages);
+    pressInSelection = false;
     dragging = false;
     fileDrop = false;
     dropSlot = 0;
@@ -1363,8 +1525,10 @@ void ThumbnailPaletteCtrl::Paint(VirtPaintCtx& ctx) {
         return;
     }
     // the ghost itself is a popup (MoveGhost)
-    Rect src = PageRectInWindow(pressPage, left, top0);
-    gfx->FillRects(&src, 1, GetColor(kColListBg), 170);
+    for (int pageNo : dragPages) {
+        Rect src = PageRectInWindow(pageNo, left, top0);
+        gfx->FillRects(&src, 1, GetColor(kColListBg), 170);
+    }
     if (!dropLine.IsEmpty()) {
         gfx->FillRect(dropLine, accent);
     }
@@ -1394,6 +1558,20 @@ void ThumbnailPaletteCtrl::ReorderPages(const Vec<int>& perm, int pageNo) {
         if (thumbnail) {
             FreeThumbnail(thumbnail);
         }
+    }
+    // the selected pages stay selected wherever they went
+    if (len(selPages) > 0) {
+        Vec<int> sel;
+        for (int i = 0; i < n; i++) {
+            if (perm[i] >= 0 && VecContains(selPages, perm[i] + 1)) {
+                VecAppend(sel, i + 1);
+            }
+        }
+        VecClear(selPages);
+        if (len(sel) > 1) {
+            VecAppendVec(selPages, sel);
+        }
+        anchorPage = 0;
     }
     if (n != pageCount) {
         pageCount = n;

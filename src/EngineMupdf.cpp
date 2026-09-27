@@ -9800,18 +9800,26 @@ bool EngineMupdfCanMovePages(EngineBase* engine) {
     return EngineMupdfCanEditPages(engine) && engine->PageCount() > 1;
 }
 
-// Move page fromPageNo in front of the page now at toSlot (pageCount + 1 puts
-// it last). One undo step.
-bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
+// Move pages (1-based, ascending, no duplicates) in front of the page now at
+// toSlot (pageCount + 1 puts them last), keeping their order. One undo step.
+// Moving a contiguous run next to itself is a no-op and fails.
+bool EngineMupdfMovePages(EngineBase* engine, const Vec<int>& pages, int toSlot) {
     if (!EngineMupdfCanMovePages(engine)) {
         return false;
     }
     EngineMupdf* e = AsEngineMupdf(engine);
     int n = e->PageCount();
-    if (fromPageNo < 1 || fromPageNo > n || toSlot < 1 || toSlot > n + 1) {
+    int k = len(pages);
+    if (k < 1 || toSlot < 1 || toSlot > n + 1) {
         return false;
     }
-    if (toSlot == fromPageNo || toSlot == fromPageNo + 1) {
+    for (int i = 0; i < k; i++) {
+        if (pages[i] < 1 || pages[i] > n || (i > 0 && pages[i] <= pages[i - 1])) {
+            return false;
+        }
+    }
+    bool contiguous = pages[k - 1] - pages[0] == k - 1;
+    if (contiguous && toSlot >= pages[0] && toSlot <= pages[k - 1] + 1) {
         return false;
     }
     auto* ctx = e->Ctx();
@@ -9826,15 +9834,25 @@ bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
         pdf_document* doc = e->pdfdoc;
         fz_var(ok);
         fz_try(ctx) {
-            pdf_begin_operation(ctx, doc, "Move page");
+            pdf_begin_operation(ctx, doc, k == 1 ? "Move page" : "Move pages");
             fz_try(ctx) {
-                pdf_obj* obj = pdf_lookup_page_obj(ctx, doc, fromPageNo - 1);
-                // the page may inherit its size / resources from its old parent
-                pdf_flatten_inheritable_page_items(ctx, obj);
+                Vec<pdf_obj*> objs;
+                for (int pageNo : pages) {
+                    pdf_obj* obj = pdf_lookup_page_obj(ctx, doc, pageNo - 1);
+                    // the page may inherit its size / resources from its old parent
+                    pdf_flatten_inheritable_page_items(ctx, obj);
+                    VecAppend(objs, obj);
+                }
                 // insert first: a page that is briefly out of the tree gets closed
-                pdf_insert_page(ctx, doc, toSlot - 1, obj);
-                int oldIdx = toSlot <= fromPageNo ? fromPageNo : fromPageNo - 1;
-                pdf_delete_page(ctx, doc, oldIdx);
+                for (int i = 0; i < k; i++) {
+                    pdf_insert_page(ctx, doc, toSlot - 1 + i, objs[i]);
+                }
+                // the originals in front of toSlot kept their index, the rest
+                // shifted by k; from the back so earlier indexes stay valid
+                for (int i = k - 1; i >= 0; i--) {
+                    int oldIdx = pages[i] - 1;
+                    pdf_delete_page(ctx, doc, oldIdx < toSlot - 1 ? oldIdx : oldIdx + k);
+                }
                 pdf_end_operation(ctx, doc);
                 ok = true;
             }
@@ -9845,7 +9863,7 @@ bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
         }
         fz_catch(ctx) {
             fz_report_error(ctx);
-            logf("EngineMupdfMovePage: moving page %d to %d failed\n", fromPageNo, toSlot);
+            logf("EngineMupdfMovePages: moving %d pages from %d to %d failed\n", k, pages[0], toSlot);
         }
     }
     if (!ok) {
@@ -9856,10 +9874,10 @@ bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
     return true;
 }
 
-// Insert nPages pages (-1: all) starting at fromPageNo of the PDF at path in
-// front of the page now at toSlot (pageCount + 1 appends). One undo step. Annotations and form fields of the
+// Insert the pages srcPages (1-based, in that order; nullptr: all) of the PDF at
+// path in front of the page now at toSlot (pageCount + 1 appends). One undo step. Annotations and form fields of the
 // inserted pages are flattened into their content. Returns the number of pages inserted, 0 on failure.
-int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot, int fromPageNo, int nPages) {
+int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot, const Vec<int>* srcPages) {
     EngineMupdf* e = AsEngineMupdf(engine);
     if (!EngineMupdfCanEditPages(engine)) {
         return 0;
@@ -9891,16 +9909,21 @@ int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot, int f
             // fields into it first (in memory, the file isn't touched)
             pdf_bake_document(ctx, srcDoc, 1, 1);
             int srcCount = pdf_count_pages(ctx, srcDoc);
-            int first = fromPageNo - 1;
-            int n = nPages < 0 ? srcCount - first : nPages;
-            if (first < 0 || n < 1 || first + n > srcCount) {
-                fz_throw(ctx, FZ_ERROR_ARGUMENT, "bad page range");
+            int n = srcPages ? len(*srcPages) : srcCount;
+            if (n < 1) {
+                fz_throw(ctx, FZ_ERROR_ARGUMENT, "no pages");
+            }
+            for (int i = 0; srcPages && i < n; i++) {
+                if ((*srcPages)[i] < 1 || (*srcPages)[i] > srcCount) {
+                    fz_throw(ctx, FZ_ERROR_ARGUMENT, "bad page number");
+                }
             }
             map = pdf_new_graft_map(ctx, doc);
             pdf_begin_operation(ctx, doc, "Insert pages");
             fz_try(ctx) {
                 for (int i = 0; i < n; i++) {
-                    pdf_graft_mapped_page(ctx, map, toSlot - 1 + i, srcDoc, first + i);
+                    int srcIdx = srcPages ? (*srcPages)[i] - 1 : i;
+                    pdf_graft_mapped_page(ctx, map, toSlot - 1 + i, srcDoc, srcIdx);
                 }
                 pdf_end_operation(ctx, doc);
                 nInserted = n;
