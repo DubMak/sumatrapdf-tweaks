@@ -336,6 +336,7 @@ static SeqStrings gCommandNames =
     "CmdZoomFitVisible\0"
     "CmdSignWithImage\0"
     "CmdInsertTextSnippet\0"
+    "CmdSave\0"
     "\0";
 
 static i32 gCommandIds[] = {
@@ -661,6 +662,7 @@ static i32 gCommandIds[] = {
     CmdZoomFitVisible,
     CmdSignWithImage,
     CmdInsertTextSnippet,
+    CmdSave,
 };
 
 SeqStrings gCommandDescriptions =
@@ -986,6 +988,7 @@ SeqStrings gCommandDescriptions =
     "Zoom: Fit Visible\0"
     "Sign With Image\0"
     "Insert Text Snippet\0"
+    "Save\0"
     "\0";
 
 SeqStrings gCommandAltDescs =

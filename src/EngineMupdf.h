@@ -223,6 +223,11 @@ class EngineMupdf : public EngineBase {
     int journalNesting = 0;
     // position in the undo history the file was last saved at
     int savedUndoPos = 0;
+    // pdf object number of each page, in page order; filled on the first page
+    // move so undo / redo can tell how the pages were reordered
+    Vec<int> pageObjNums;
+    // pagePerm[newIdx] = oldIdx of the last reorder, until taken by the UI
+    Vec<int> pagePerm;
 
     // smart dark mode: engine-level image feature/processed caches
     DarkModeEngineCache* darkModeEngineCache = nullptr;

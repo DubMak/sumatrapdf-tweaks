@@ -11843,6 +11843,76 @@ void EndPdfEditOperation(MainWindow* win) {
 
 // Step the document's edit history. MuPDF restores the objects; every wrapper,
 // selection and cached rendering that pointed at the old state has to go.
+// pages were reordered in the engine (a move, or its undo / redo): bring the
+// view, the thumbnails and the rest of the ui along. goToPageNo 0 keeps the
+// page that was current
+static void ApplyPageReorder(WindowTab* tab, int goToPageNo) {
+    MainWindow* win = tab ? tab->win : nullptr;
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    if (!win || !dm) {
+        return;
+    }
+    Vec<int> perm;
+    if (!EngineMupdfTakePagePerm(dm->GetEngine(), perm)) {
+        return;
+    }
+    if (goToPageNo <= 0) {
+        int curr = dm->CurrentPageNo();
+        for (int i = 0; i < len(perm); i++) {
+            if (perm[i] == curr - 1) {
+                goToPageNo = i + 1;
+                break;
+            }
+        }
+    }
+    DeleteOldSelectionInfo(win, true);
+    if (gRenderCache) {
+        gRenderCache->AbortRendering(dm);
+        gRenderCache->FreeForDisplayModel(dm);
+    }
+    dm->SyncWithEngineLayout();
+    if (win->CurrentTab() == tab && win->tocThumbnails) {
+        SidebarThumbnailsReorder(win->tocThumbnails, perm, goToPageNo);
+    }
+    if (goToPageNo > 0) {
+        dm->GoToPage(goToPageNo, 0, false);
+    }
+    RefreshAnnotationLists(tab);
+    NotifyAnnotationsChanged(tab);
+    ToolbarUpdateStateForWindow(win, true);
+    MainWindowRerender(win, true);
+}
+
+bool CanMovePagesInTab(WindowTab* tab) {
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    if (!dm || !tab->win || tab->win->CurrentTab() != tab) {
+        return false;
+    }
+    return EngineMupdfCanMovePages(dm->GetEngine());
+}
+
+// move page fromPageNo in front of the page now at toSlot (pageCount + 1 for
+// the end); one undo step
+void MovePageInTab(WindowTab* tab, int fromPageNo, int toSlot) {
+    if (!CanMovePagesInTab(tab)) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    DisplayModel* dm = tab->AsFixed();
+    CancelAnnotationPlacement(win);
+    CancelDrag(win);
+    SetSelectedAnnotation(tab, nullptr);
+    if (gRenderCache) {
+        gRenderCache->AbortRendering(dm);
+    }
+    if (!EngineMupdfMovePage(dm->GetEngine(), fromPageNo, toSlot)) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Couldn't move the page"), kNotif5SecsTimeOut);
+        return;
+    }
+    int newPageNo = toSlot <= fromPageNo ? toSlot : toSlot - 1;
+    ApplyPageReorder(tab, newPageNo);
+}
+
 static void UndoRedoInTab(WindowTab* tab, bool redo) {
     if (!tab) {
         return;
@@ -11877,6 +11947,7 @@ static void UndoRedoInTab(WindowTab* tab, bool redo) {
     }
     // the wrapper deletes above mark the document modified; the journal knows better
     EngineMupdfRefreshModifiedState(engine);
+    ApplyPageReorder(tab, 0);
     DeleteOldSelectionInfo(win, true);
     RefreshAnnotationLists(tab);
     NotifyAnnotationsChanged(tab);
@@ -12176,6 +12247,15 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
 
         case CmdDeleteFileAndOpenNext:
             DeleteCurrentFileAndOpenNext(win);
+            break;
+
+        case CmdSave:
+            // edits go back into the file; nothing to save means Save As
+            if (tab && tab->AsFixed() && EngineHasUnsavedAnnotations(tab->AsFixed()->GetEngine())) {
+                SaveAnnotationsToExistingFile(tab);
+            } else {
+                SaveCurrentFileAs(win);
+            }
             break;
 
         case CmdSaveAs:

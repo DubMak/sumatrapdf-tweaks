@@ -23,3 +23,4 @@ struct VirtListBox;
 struct PlatformFont;
 VirtListBox* NewSidebarThumbnails(MainWindow*, PlatformFont*, int dpi);
 void SidebarThumbnailsUpdate(VirtListBox*, bool active, int pageNo = 0);
+void SidebarThumbnailsReorder(VirtListBox*, const Vec<int>& perm, int pageNo);

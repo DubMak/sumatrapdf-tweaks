@@ -123,6 +123,10 @@ int ChapterTable::Generation() {
     return AtomicIntGet(&generation);
 }
 
+void ChapterTable::BumpGeneration() {
+    AtomicIntInc(&generation);
+}
+
 void ChapterTable::Reset() {
     AutoUnlockMutex scope(&mutex);
     int n = len(pageCounts);

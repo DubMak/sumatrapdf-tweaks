@@ -121,6 +121,9 @@ bool EngineMupdfCanRedo(EngineBase*);
 bool EngineMupdfUndo(EngineBase*, Vec<Annotation*>& removedOut);
 bool EngineMupdfRedo(EngineBase*, Vec<Annotation*>& removedOut);
 void EngineMupdfRefreshModifiedState(EngineBase*);
+bool EngineMupdfCanMovePages(EngineBase*);
+bool EngineMupdfMovePage(EngineBase*, int fromPageNo, int toSlot);
+bool EngineMupdfTakePagePerm(EngineBase*, Vec<int>& permOut);
 
 bool EngineMupdfSupportsAnnotations(EngineBase*);
 bool EngineMupdfIsPdf(EngineBase* engine);

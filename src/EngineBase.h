@@ -572,6 +572,8 @@ class EngineBase {
     Location LastLocation();
     Location ClampLocation(Location loc);
     int LayoutGeneration();
+    // pages moved without the count changing; tells DisplayModel to resync
+    void BumpLayoutGeneration();
     void EnsureAllChaptersLaidOut();
     int ChaptersLaidOut();
     // lay out every chapter that isn't yet, off the UI thread. the chapter the

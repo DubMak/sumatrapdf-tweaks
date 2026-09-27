@@ -338,6 +338,7 @@ const commandsRaw = [
     "CmdZoomFitVisible", "Zoom: Fit Visible",
     "CmdSignWithImage", "Sign With Image",
     "CmdInsertTextSnippet", "Insert Text Snippet",
+    "CmdSave", "Save",
 ];
 
 // removed slots are dropped: nothing outside the generators should see them

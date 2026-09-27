@@ -33,6 +33,8 @@ struct ChapterTable {
     Location LocationFromPageNo(int pageNo);
     int PageNoFromLocation(Location loc);
     int Generation();
+    // for a change that keeps the page counts (pages reordered)
+    void BumpGeneration();
     void Reset();
 
   private:

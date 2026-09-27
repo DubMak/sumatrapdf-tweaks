@@ -9586,6 +9586,214 @@ static void ResyncWrapperList(EngineMupdf* e, int pageNo, Vec<Annotation*>& wrap
     wrappers = res;
 }
 
+//--- Page order
+
+// pdf object number of every page, in page order. Caller holds docLock
+static bool ReadPageObjNums(EngineMupdf* e, Vec<int>& out) {
+    auto* ctx = e->Ctx();
+    VecReset(out);
+    bool ok = false;
+    fz_var(ok);
+    fz_try(ctx) {
+        int n = pdf_count_pages(ctx, e->pdfdoc);
+        for (int i = 0; i < n; i++) {
+            VecAppend(out, pdf_to_num(ctx, pdf_lookup_page_obj(ctx, e->pdfdoc, i)));
+        }
+        ok = true;
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+    }
+    return ok;
+}
+
+static void RemapTocPages(TocItem* item, const Vec<int>& inv) {
+    for (; item; item = item->next) {
+        int oldNo = item->pageNo;
+        if (oldNo >= 1 && oldNo <= len(inv)) {
+            int newNo = inv[oldNo - 1] + 1;
+            item->pageNo = newNo;
+            item->loc = {1, newNo};
+            // a dest may be shared by several items: only move it once
+            IPageDestination* dest = item->dest;
+            if (dest && dest->pageNo == oldNo) {
+                dest->pageNo = newNo;
+                dest->loc = {1, newNo};
+            }
+        }
+        RemapTocPages(item->child, inv);
+    }
+}
+
+// Bring our per-page state in line with the document's page tree after a page
+// move or its undo / redo. Caller holds pagesLock and renderLock.
+static void SyncPageOrder(EngineMupdf* e) {
+    if (len(e->pageObjNums) == 0 || len(e->chapterPages) != 1) {
+        return;
+    }
+    auto* ctx = e->Ctx();
+    Vec<int> nums;
+    {
+        AutoUnlockRecursiveMutex docScope(&e->docLock);
+        if (!ReadPageObjNums(e, nums)) {
+            return;
+        }
+    }
+    Vec<FzPageInfo*>* v = e->chapterPages[0];
+    int n = len(nums);
+    if (!v || len(*v) != n || len(e->pageObjNums) != n) {
+        return;
+    }
+    Vec<int> perm;
+    bool changed = false;
+    for (int i = 0; i < n; i++) {
+        int from = -1;
+        for (int j = 0; j < n; j++) {
+            if (e->pageObjNums[j] == nums[i]) {
+                from = j;
+                break;
+            }
+        }
+        if (from < 0) {
+            return;
+        }
+        VecAppend(perm, from);
+        changed |= from != i;
+    }
+    if (!changed) {
+        return;
+    }
+
+    Vec<FzPageInfo*> old;
+    VecAppendVec(old, *v);
+    Vec<int> inv;
+    VecResize(inv, n);
+    for (int i = 0; i < n; i++) {
+        FzPageInfo* pi = old[perm[i]];
+        (*v)[i] = pi;
+        inv[perm[i]] = i;
+        e->pageObjNums[i] = nums[i];
+        pi->pageNo = i + 1;
+        pi->loc = {1, i + 1};
+        for (Annotation* a : pi->annotations) {
+            a->pageNo = i + 1;
+        }
+        for (Annotation* a : pi->widgets) {
+            a->pageNo = i + 1;
+        }
+    }
+    // every page: links on pages that stayed may point at pages that moved
+    for (FzPageInfo* pi : *v) {
+        if (pi->annotsLoaded) {
+            AutoUnlockRecursiveMutex docScope(&e->docLock);
+            RebuildCommentsFromAnnotations(ctx, pi);
+        }
+        InvalidateFzPageAfterContentChange(e, pi);
+        e->InvalidateTextForPage(pi->pageNo);
+    }
+    {
+        AutoUnlockMutex clipScope(&e->clipOptLock);
+        VecReset(e->clipOptKnown);
+    }
+    {
+        AutoUnlockRecursiveMutex docScope(&e->docLock);
+        if (e->pageLabels) {
+            e->pageLabels->~StrVec();
+            e->pageLabels = nullptr;
+        }
+        fz_try(ctx) {
+            pdf_obj* labels = pdf_dict_getp(ctx, pdf_trailer(ctx, e->pdfdoc), "Root/PageLabels");
+            if (labels) {
+                e->pageLabels = BuildPageLabelVec(e->arena, ctx, labels, n);
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+        }
+        if (e->tocTree && e->tocTree->root) {
+            RemapTocPages(e->tocTree->root, inv);
+        }
+    }
+    VecReset(e->pagePerm);
+    VecAppendVec(e->pagePerm, perm);
+    e->BumpLayoutGeneration();
+}
+
+// only a plain, journalled PDF: the page tree is the page order
+bool EngineMupdfCanMovePages(EngineBase* engine) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    return e && e->pdfdoc && len(e->chapterPages) == 1 && e->journalNesting == 0 && e->PageCount() > 1;
+}
+
+// Move page fromPageNo in front of the page now at toSlot (pageCount + 1 puts
+// it last). One undo step.
+bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
+    if (!EngineMupdfCanMovePages(engine)) {
+        return false;
+    }
+    EngineMupdf* e = AsEngineMupdf(engine);
+    int n = e->PageCount();
+    if (fromPageNo < 1 || fromPageNo > n || toSlot < 1 || toSlot > n + 1) {
+        return false;
+    }
+    if (toSlot == fromPageNo || toSlot == fromPageNo + 1) {
+        return false;
+    }
+    auto* ctx = e->Ctx();
+    AutoUnlockRecursiveMutex pagesScope(&e->pagesLock);
+    AutoUnlockMutex renderScope(&e->renderLock);
+    bool ok = false;
+    {
+        AutoUnlockRecursiveMutex docScope(&e->docLock);
+        if (len(e->pageObjNums) == 0 && !ReadPageObjNums(e, e->pageObjNums)) {
+            return false;
+        }
+        pdf_document* doc = e->pdfdoc;
+        fz_var(ok);
+        fz_try(ctx) {
+            pdf_begin_operation(ctx, doc, "Move page");
+            fz_try(ctx) {
+                pdf_obj* obj = pdf_lookup_page_obj(ctx, doc, fromPageNo - 1);
+                // the page may inherit its size / resources from its old parent
+                pdf_flatten_inheritable_page_items(ctx, obj);
+                // insert first: a page that is briefly out of the tree gets closed
+                pdf_insert_page(ctx, doc, toSlot - 1, obj);
+                int oldIdx = toSlot <= fromPageNo ? fromPageNo : fromPageNo - 1;
+                pdf_delete_page(ctx, doc, oldIdx);
+                pdf_end_operation(ctx, doc);
+                ok = true;
+            }
+            fz_catch(ctx) {
+                pdf_abandon_operation(ctx, doc);
+                fz_rethrow(ctx);
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("EngineMupdfMovePage: moving page %d to %d failed\n", fromPageNo, toSlot);
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+    e->modifiedAnnotations = true;
+    SyncPageOrder(e);
+    return true;
+}
+
+// the reorder made by the last move / undo / redo, if any; perm[newIdx] = oldIdx
+bool EngineMupdfTakePagePerm(EngineBase* engine, Vec<int>& permOut) {
+    VecReset(permOut);
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!e || len(e->pagePerm) == 0) {
+        return false;
+    }
+    AutoUnlockRecursiveMutex pagesScope(&e->pagesLock);
+    VecAppendVec(permOut, e->pagePerm);
+    VecReset(e->pagePerm);
+    return true;
+}
+
 // Undo / redo restores objects under our feet: MuPDF re-syncs each open page,
 // which frees the pdf_annot of an annotation that went away and makes a fresh
 // one for an annotation that came back. Bring our wrappers in line and drop
@@ -9632,6 +9840,7 @@ static void SyncPagesAfterUndoRedo(EngineMupdf* e, Vec<Annotation*>& removedOut)
         InvalidateFzPageAfterContentChange(e, pi);
         e->InvalidateTextForPage(pi->pageNo);
     });
+    SyncPageOrder(e);
 }
 
 // Step one operation back (or forward with redo). Returns false if there was

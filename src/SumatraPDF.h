@@ -204,6 +204,8 @@ int ToolbarPositionFromPrefs();
 bool ToolbarAtBottom();
 void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword = true);
+bool CanMovePagesInTab(WindowTab*);
+void MovePageInTab(WindowTab*, int fromPageNo, int toSlot);
 bool AutoReloadFileStillChanging(WindowTab* tab);
 void DeleteControllerAsync(DocController* ctrl);
 void ToggleFullScreen(MainWindow* win, bool presentation = false);

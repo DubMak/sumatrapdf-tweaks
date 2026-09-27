@@ -136,7 +136,11 @@ static MenuDef menuDefFile[] = {
         CmdShowInFolder,
     },
     {
-        TrN("&Save As..."),
+        TrN("&Save"),
+        CmdSave,
+    },
+    {
+        TrN("Save &As..."),
         CmdSaveAs,
     },
     {

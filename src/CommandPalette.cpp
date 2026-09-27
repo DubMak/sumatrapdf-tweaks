@@ -301,6 +301,8 @@ struct ThumbnailPaletteCache {
     int rotation = 0;
     int thumbDx = 0;
     int thumbDy = 0;
+    // bumped when the pages are reordered; older renders are dropped
+    int orderGen = 0;
     bool workerRunning = false;
     bool deleteWhenWorkerFinishes = false;
 };
@@ -315,6 +317,7 @@ struct ThumbnailRowsModel : ListBoxModel {
 struct ThumbnailRenderTask {
     ThumbnailPaletteCache* cache = nullptr;
     int pageNo = 0;
+    int orderGen = 0;
     Location loc;
     Pixmap* bitmap = nullptr;
 };
@@ -322,6 +325,9 @@ struct ThumbnailRenderTask {
 struct ThumbnailRenderWorker {
     ThumbnailPaletteCache* cache = nullptr;
     EngineBase* sourceEngine = nullptr;
+    // render from sourceEngine itself, not a clone: sees unsaved page moves
+    bool useSourceEngine = false;
+    int orderGen = 0;
     Vec<int> pages;
     Vec<Location> locs;
     int rotation = 0;
@@ -347,6 +353,15 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     bool sidebarMode = false;
     // what the thumbnails were made for; a change means ResetForCurrentTab()
     DisplayModel* madeForDm = nullptr;
+    // dragging a page: the page pressed, where it was grabbed, the mouse (in
+    // window coords) and the slot it would land in (1-based, 0 = none)
+    int pressPage = 0;
+    Point pressPt;
+    Point grabOffset;
+    Point dragPt;
+    bool dragging = false;
+    int dropSlot = 0;
+    Rect dropLine;
 
     ThumbnailPaletteCtrl(MainWindow*, PlatformFont*, int dpi, bool sidebarMode = false);
     ~ThumbnailPaletteCtrl() override;
@@ -366,8 +381,16 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     bool NeedsReset();
     void ResetForCurrentTab();
     void SetCurrentPage(int pageNo);
+    void Paint(VirtPaintCtx&) override;
+    void AutoScrollDrag();
+    void ReorderPages(const Vec<int>& perm, int pageNo);
 
   private:
+    bool GridOrigin(int& left, int& top0);
+    Rect PageRectInWindow(int pageNo, int left, int top0);
+    void UpdateDrop(Point pt);
+    void EndPageDrag();
+    void OnThumbCaptureLost();
     void InitForCurrentTab();
     void FreeCache();
     void SetThumbSize(int dx);
@@ -375,6 +398,16 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void SelectPage(int);
     void OpenSelectedPage();
 };
+
+// auto-scrolls the sidebar while a page is dragged near its edge
+constexpr UINT_PTR kThumbDragTimerId = 0x7d47;
+static ThumbnailPaletteCtrl* gThumbDragCtrl = nullptr;
+
+static void CALLBACK ThumbDragTimerProc(HWND, UINT, UINT_PTR, DWORD) {
+    if (gThumbDragCtrl) {
+        gThumbDragCtrl->AutoScrollDrag();
+    }
+}
 
 static void FreeThumbnail(Pixmap* thumbnail) {
     if (thumbnail != kThumbnailRenderFailed) {
@@ -429,7 +462,8 @@ static Pixmap* RenderPageThumbnail(EngineBase* engine, int pageNo, Location loc,
 static void FinishThumbnailRender(ThumbnailRenderTask* task) {
     ThumbnailPaletteCache* cache = task->cache;
     int idx = task->pageNo - 1;
-    bool isValid = !cache->deleteWhenWorkerFinishes && idx >= 0 && idx < len(cache->thumbnails);
+    bool isValid = !cache->deleteWhenWorkerFinishes && idx >= 0 && idx < len(cache->thumbnails) &&
+                   task->orderGen == cache->orderGen;
     // rendered for a sidebar width that has changed since: drop it, it gets
     // re-rendered at the new size
     if (isValid && task->bitmap && std::abs(task->bitmap->width - cache->thumbDx) > 2) {
@@ -470,6 +504,7 @@ static void RenderAndPostThumbnail(ThumbnailRenderWorker* worker, EngineBase* en
     auto* task = new ThumbnailRenderTask;
     task->cache = worker->cache;
     task->pageNo = pageNo;
+    task->orderGen = worker->orderGen;
     task->loc = loc;
     task->bitmap = RenderPageThumbnail(engine, pageNo, loc, worker->rotation, worker->thumbDx, worker->thumbDy);
     uitask::Post(MkFunc0<ThumbnailRenderTask>(FinishThumbnailRender, task));
@@ -478,8 +513,13 @@ static void RenderAndPostThumbnail(ThumbnailRenderWorker* worker, EngineBase* en
 static void RenderThumbnailsInBackground(ThumbnailRenderWorker* worker) {
     ThumbnailPaletteCache* cache = worker->cache;
     if (worker->sourceEngine) {
-        cache->renderEngine = worker->sourceEngine->Clone();
-        worker->sourceEngine->Release();
+        if (worker->useSourceEngine) {
+            // keeps the reference
+            cache->renderEngine = worker->sourceEngine;
+        } else {
+            cache->renderEngine = worker->sourceEngine->Clone();
+            worker->sourceEngine->Release();
+        }
         worker->sourceEngine = nullptr;
     }
     EngineBase* engine = cache->renderEngine;
@@ -492,6 +532,7 @@ static void RenderThumbnailsInBackground(ThumbnailRenderWorker* worker) {
             Location loc = i < len(worker->locs) ? worker->locs[i] : kInvalidLocation;
             RenderAndPostThumbnail(worker, engine, worker->pages[i], loc);
         }
+        engine->ReleaseTextExtractionThreadContext();
     }
     uitask::Post(MkFunc0<ThumbnailPaletteCache>(FinishThumbnailWorker, cache));
     delete worker;
@@ -528,6 +569,7 @@ ThumbnailPaletteCtrl::ThumbnailPaletteCtrl(MainWindow* win, PlatformFont* font, 
         MkMethod1<ThumbnailPaletteCtrl, VirtMouseEvent*, &ThumbnailPaletteCtrl::OnThumbMouseWheel>(this);
     VirtCtrl::onDoubleClick =
         MkMethod1<ThumbnailPaletteCtrl, VirtMouseEvent*, &ThumbnailPaletteCtrl::OnThumbDoubleClick>(this);
+    onCaptureLost = MkMethod0<ThumbnailPaletteCtrl, &ThumbnailPaletteCtrl::OnThumbCaptureLost>(this);
 }
 
 void ThumbnailPaletteCtrl::InitForCurrentTab() {
@@ -619,6 +661,7 @@ void ThumbnailPaletteCtrl::SetThumbSize(int dx) {
 }
 
 ThumbnailPaletteCtrl::~ThumbnailPaletteCtrl() {
+    EndPageDrag();
     cache->ctrl = nullptr;
     AtomicIntSet(&cache->cancelRendering, 1);
     if (cache->workerRunning) {
@@ -784,6 +827,17 @@ void ThumbnailPaletteCtrl::OnThumbMouseDown(VirtMouseEvent* ev) {
         SelectPage(pageNo);
         if (sidebarMode) {
             OpenSelectedPage();
+            // hold the mouse: moving it past the drag threshold picks the page up
+            int left = 0;
+            int top0 = 0;
+            if (root && ev->button == 0 && CanMovePagesInTab(tab) && GridOrigin(left, top0)) {
+                pressPage = pageNo;
+                pressPt = ev->ptWindow;
+                Rect r = PageRectInWindow(pageNo, left, top0);
+                grabOffset = {pressPt.x - r.x, pressPt.y - r.y};
+                dragging = false;
+                root->SetCapture(this);
+            }
         }
         ev->didHandle = true;
         return;
@@ -796,6 +850,25 @@ void ThumbnailPaletteCtrl::OnThumbMouseDown(VirtMouseEvent* ev) {
 }
 
 void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
+    if (pressPage > 0) {
+        if (!dragging) {
+            int dx = std::abs(ev->ptWindow.x - pressPt.x);
+            int dy = std::abs(ev->ptWindow.y - pressPt.y);
+            if (dx < GetSystemMetrics(SM_CXDRAG) && dy < GetSystemMetrics(SM_CYDRAG)) {
+                ev->didHandle = true;
+                return;
+            }
+            dragging = true;
+            HWND hwnd = GetHwnd();
+            if (hwnd) {
+                gThumbDragCtrl = this;
+                SetTimer(hwnd, kThumbDragTimerId, 30, ThumbDragTimerProc);
+            }
+        }
+        UpdateDrop(ev->ptWindow);
+        ev->didHandle = true;
+        return;
+    }
     int oldScrollY = scrollY;
     VirtListBox::OnMouseMove(ev);
     if (scrollY != oldScrollY) {
@@ -812,6 +885,16 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
 }
 
 void ThumbnailPaletteCtrl::OnThumbMouseUp(VirtMouseEvent* ev) {
+    if (pressPage > 0) {
+        int fromPage = pressPage;
+        int slot = dragging ? dropSlot : 0;
+        EndPageDrag();
+        if (slot > 0 && slot != fromPage && slot != fromPage + 1) {
+            MovePageInTab(tab, fromPage, slot);
+        }
+        ev->didHandle = true;
+        return;
+    }
     VirtListBox::OnMouseUp(ev);
 }
 
@@ -961,14 +1044,189 @@ void ThumbnailPaletteCtrl::StartRendering() {
     worker->rotation = cache->rotation;
     worker->thumbDx = cache->thumbDx;
     worker->thumbDy = cache->thumbDy;
+    worker->orderGen = cache->orderGen;
     if (!cache->renderEngine) {
         worker->sourceEngine = engine;
+        worker->useSourceEngine = sidebarMode;
         engine->AddRef();
     }
     AtomicIntSet(&cache->cancelRendering, 0);
     cache->workerRunning = true;
     RunAsync(MkFunc0<ThumbnailRenderWorker>(RenderThumbnailsInBackground, worker),
              StrL("CommandPaletteThumbnailRender"));
+}
+
+//--- dragging a page to a new place (sidebar only)
+
+// where the grid starts: left edge of the first column and the top of row 0
+// (scrolled, may be above the control). False when no row is visible
+bool ThumbnailPaletteCtrl::GridOrigin(int& left, int& top0) {
+    int dy = GetItemHeight();
+    int first = scrollY / dy;
+    Rect r = ItemRect(first);
+    if (r.IsEmpty()) {
+        r = ItemRect(first + 1);
+    }
+    if (r.IsEmpty()) {
+        return false;
+    }
+    int gridDx = (cols * thumbDx) + ((cols - 1) * gap);
+    left = r.x + std::max(0, (r.dx - gridDx) / 2);
+    top0 = ContentRectInWindow().y - scrollY;
+    return true;
+}
+
+Rect ThumbnailPaletteCtrl::PageRectInWindow(int pageNo, int left, int top0) {
+    int row = (pageNo - 1) / cols;
+    int col = (pageNo - 1) % cols;
+    return {left + (col * (thumbDx + gap)), top0 + (row * itemDy), thumbDx, thumbDy};
+}
+
+// pick the slot the dragged page would land in: between rows when there is
+// one column (a horizontal line), between pages of a row otherwise (vertical)
+void ThumbnailPaletteCtrl::UpdateDrop(Point pt) {
+    dragPt = pt;
+    dropSlot = 0;
+    dropLine = {};
+    int left = 0;
+    int top0 = 0;
+    Rect bounds = BoundsInWindow();
+    if (pt.x < bounds.x || pt.x >= bounds.Right() || !GridOrigin(left, top0)) {
+        Invalidate();
+        return;
+    }
+    Rect content = ContentRectInWindow();
+    int y = Clamp(pt.y, content.y, content.Bottom() - 1);
+    int lineDx = DpiScaleByDpi(dpi, 3);
+    int cellDx = thumbDx + gap;
+    if (cols == 1) {
+        int mid = top0 + (thumbDy / 2);
+        int b = y >= mid ? ((y - mid) / itemDy) + 1 : 0;
+        b = Clamp(b, 0, pageCount);
+        dropSlot = b + 1;
+        int lineY = top0 + (b * itemDy) - (rowGap / 2);
+        dropLine = {left, lineY - (lineDx / 2), thumbDx, lineDx};
+    } else {
+        int row = y >= top0 ? (y - top0) / itemDy : 0;
+        row = Clamp(row, 0, std::max(0, rowsModel->rows - 1));
+        int inRow = std::min(cols, pageCount - (row * cols));
+        int mid = left + (thumbDx / 2);
+        int c = pt.x >= mid ? ((pt.x - mid) / cellDx) + 1 : 0;
+        c = Clamp(c, 0, inRow);
+        dropSlot = (row * cols) + c + 1;
+        int lineX = left + (c * cellDx) - (gap / 2);
+        dropLine = {lineX - (lineDx / 2), top0 + (row * itemDy), lineDx, thumbDy};
+    }
+    // dropping next to itself doesn't move it
+    if (dropSlot == pressPage || dropSlot == pressPage + 1) {
+        dropLine = {};
+    }
+    Invalidate();
+}
+
+// scroll while the page is held near the top or bottom edge
+void ThumbnailPaletteCtrl::AutoScrollDrag() {
+    if (!dragging) {
+        return;
+    }
+    Rect content = ContentRectInWindow();
+    int zone = std::max(DpiScaleByDpi(dpi, 24), thumbDy / 4);
+    int step = 0;
+    if (dragPt.y < content.y + zone) {
+        step = -std::max(1, (content.y + zone - dragPt.y) / 2);
+    } else if (dragPt.y > content.Bottom() - zone) {
+        step = std::max(1, (dragPt.y - (content.Bottom() - zone)) / 2);
+    }
+    if (step != 0 && ScrollBy(step)) {
+        UpdateDrop(dragPt);
+        StartRendering();
+    }
+}
+
+void ThumbnailPaletteCtrl::EndPageDrag() {
+    if (gThumbDragCtrl == this) {
+        HWND hwnd = GetHwnd();
+        if (hwnd) {
+            KillTimer(hwnd, kThumbDragTimerId);
+        }
+        gThumbDragCtrl = nullptr;
+    }
+    bool wasDragging = dragging;
+    pressPage = 0;
+    dragging = false;
+    dropSlot = 0;
+    dropLine = {};
+    if (wasDragging) {
+        Invalidate();
+    }
+}
+
+void ThumbnailPaletteCtrl::OnThumbCaptureLost() {
+    VirtListBox::OnCaptureLost();
+    EndPageDrag();
+}
+
+// on top of the rows: the page being moved fades, a line shows where it goes
+// and a ghost of it follows the mouse
+void ThumbnailPaletteCtrl::Paint(VirtPaintCtx& ctx) {
+    VirtListBox::Paint(ctx);
+    int left = 0;
+    int top0 = 0;
+    if (!dragging || !GridOrigin(left, top0)) {
+        return;
+    }
+    Gfx* gfx = ctx.gfx;
+    Color accent = MkRgb(0, 120, 215);
+    gfx->PushClip(ctx.clip.Intersect(ctx.bounds));
+    Rect src = PageRectInWindow(pressPage, left, top0);
+    gfx->FillRects(&src, 1, GetColor(kColListBg), 170);
+    if (!dropLine.IsEmpty()) {
+        gfx->FillRect(dropLine, accent);
+    }
+
+    int ghostDx = std::max(1, (thumbDx * 3) / 4);
+    int ghostDy = std::max(1, (thumbDy * 3) / 4);
+    Rect ghost{dragPt.x - ((grabOffset.x * 3) / 4), dragPt.y - ((grabOffset.y * 3) / 4), ghostDx, ghostDy};
+    int shadow = DpiScaleByDpi(dpi, 4);
+    Rect shadowRect = ghost;
+    shadowRect.Offset(shadow, shadow);
+    gfx->FillRects(&shadowRect, 1, MkRgb(0, 0, 0), 50);
+    gfx->FillRect(ghost, kColWhite);
+    Pixmap* thumbnail = ThumbnailToDraw(cache, pressPage - 1);
+    if (thumbnail) {
+        int drawDx = (std::min(thumbnail->width, thumbDx) * 3) / 4;
+        int drawDy = (std::min(thumbnail->height, thumbDy) * 3) / 4;
+        Rect target{ghost.x + ((ghostDx - drawDx) / 2), ghost.y + ((ghostDy - drawDy) / 2), drawDx, drawDy};
+        gfx->DrawPixmap(thumbnail, target);
+    }
+    // see-through look
+    gfx->FillRects(&ghost, 1, kColWhite, 80);
+    gfx->DrawRect(ghost, accent, 2);
+    gfx->PopClip();
+}
+
+// after the pages were reordered in the document: move the thumbnails along
+void ThumbnailPaletteCtrl::ReorderPages(const Vec<int>& perm, int pageNo) {
+    if (win->CurrentTab() != tab || len(perm) != pageCount || len(cache->thumbnails) != pageCount) {
+        ResetForCurrentTab();
+        return;
+    }
+    Vec<Pixmap*> old;
+    VecAppendVec(old, cache->thumbnails);
+    for (int i = 0; i < pageCount; i++) {
+        cache->thumbnails[i] = old[perm[i]];
+    }
+    // thumbnails being rendered are for the old order
+    cache->orderGen++;
+    if (cache->workerRunning) {
+        AtomicIntSet(&cache->cancelRendering, 1);
+    }
+    if (pageNo > 0) {
+        selectedPage = Clamp(pageNo, 1, pageCount);
+        EnsureVisible((selectedPage - 1) / cols);
+    }
+    Invalidate();
+    StartRendering();
 }
 
 void CommandPaletteWnd::SetThumbnailMode(ThumbnailMode mode) {
@@ -3180,4 +3438,13 @@ void SidebarThumbnailsUpdate(VirtListBox* lb, bool active, int pageNo) {
     if (pageNo > 0) {
         ctrl->SetCurrentPage(pageNo);
     }
+}
+
+// the pages were reordered (perm[newIdx] = oldIdx); pageNo gets highlighted
+void SidebarThumbnailsReorder(VirtListBox* lb, const Vec<int>& perm, int pageNo) {
+    auto* ctrl = (ThumbnailPaletteCtrl*)lb;
+    if (!ctrl || !ctrl->cache) {
+        return;
+    }
+    ctrl->ReorderPages(perm, pageNo);
 }
