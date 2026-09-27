@@ -1,0 +1,69 @@
+# Fork build: 64-bit Release exe, portable (static) exe and installer.
+# Every push to my-tweaks uploads them as a workflow artifact; pushing a tag
+# v* also publishes them as a GitHub release.
+name: Tweaks build
+on:
+  push:
+    branches: [my-tweaks]
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+    steps:
+      - name: Check out source code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # the build number is the commit count
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+
+      - name: Generate the in-app manual
+        run: bun .\cmd\gen-docs.ts
+
+      - name: Stamp version
+        shell: pwsh
+        run: |
+          $ver = (git rev-list --count HEAD).Trim()
+          $sha = (git rev-parse HEAD).Trim()
+          $date = Get-Date -Format yyyy-MM-dd
+          "#define GIT_COMMIT_ID $sha`n#define BUILT_ON $date`n#define PRE_RELEASE_VER $ver`n" |
+            Out-File -Encoding ascii src\BuildConfig.h
+          "BUILD_VER=$ver" >> $env:GITHUB_ENV
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -prerelease -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          & $msbuild vs2022\SumatraPDF.sln "/t:SumatraPDF;SumatraPDF-static" "/p:Configuration=Release;Platform=x64" /m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          # SumatraPDF.exe embeds libsumatrapdf.dll; named *install* it runs as the installer
+          Copy-Item out\rel64\SumatraPDF.exe "dist\SumatraPDF-tweaks-$env:BUILD_VER-64-install.exe"
+          Copy-Item out\rel64\SumatraPDF-static.exe "dist\SumatraPDF-tweaks-$env:BUILD_VER-64.exe"
+          Get-ChildItem dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SumatraPDF-tweaks-${{ env.BUILD_VER }}-64
+          path: dist/*.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $files = (Get-ChildItem dist\*.exe).FullName
+          gh release create "${{ github.ref_name }}" @files --repo "${{ github.repository }}" --generate-notes
