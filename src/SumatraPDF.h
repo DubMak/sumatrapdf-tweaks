@@ -206,6 +206,8 @@ void UpdateTabFileDisplayStateForTab(WindowTab* tab);
 void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword = true);
 bool CanMovePagesInTab(WindowTab*);
 void MovePageInTab(WindowTab*, int fromPageNo, int toSlot);
+bool CanInsertPagesInTab(WindowTab*);
+void InsertPdfsInTab(WindowTab*, const StrVec& paths, int toSlot);
 bool AutoReloadFileStillChanging(WindowTab* tab);
 void DeleteControllerAsync(DocController* ctrl);
 void ToggleFullScreen(MainWindow* win, bool presentation = false);

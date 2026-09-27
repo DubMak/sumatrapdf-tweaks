@@ -362,6 +362,8 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     bool dragging = false;
     int dropSlot = 0;
     Rect dropLine;
+    // files are dragged over the thumbnails from outside: only the drop line
+    bool fileDrop = false;
 
     ThumbnailPaletteCtrl(MainWindow*, PlatformFont*, int dpi, bool sidebarMode = false);
     ~ThumbnailPaletteCtrl() override;
@@ -384,12 +386,13 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void Paint(VirtPaintCtx&) override;
     void AutoScrollDrag();
     void ReorderPages(const Vec<int>& perm, int pageNo);
+    void BeginFileDrop();
+    void UpdateDrop(Point pt);
+    void EndPageDrag();
 
   private:
     bool GridOrigin(int& left, int& top0);
     Rect PageRectInWindow(int pageNo, int left, int top0);
-    void UpdateDrop(Point pt);
-    void EndPageDrag();
     void OnThumbCaptureLost();
     void InitForCurrentTab();
     void FreeCache();
@@ -1118,7 +1121,7 @@ void ThumbnailPaletteCtrl::UpdateDrop(Point pt) {
         dropLine = {lineX - (lineDx / 2), top0 + (row * itemDy), lineDx, thumbDy};
     }
     // dropping next to itself doesn't move it
-    if (dropSlot == pressPage || dropSlot == pressPage + 1) {
+    if (pressPage > 0 && (dropSlot == pressPage || dropSlot == pressPage + 1)) {
         dropLine = {};
     }
     Invalidate();
@@ -1126,7 +1129,7 @@ void ThumbnailPaletteCtrl::UpdateDrop(Point pt) {
 
 // scroll while the page is held near the top or bottom edge
 void ThumbnailPaletteCtrl::AutoScrollDrag() {
-    if (!dragging) {
+    if (!dragging && !fileDrop) {
         return;
     }
     Rect content = ContentRectInWindow();
@@ -1151,13 +1154,24 @@ void ThumbnailPaletteCtrl::EndPageDrag() {
         }
         gThumbDragCtrl = nullptr;
     }
-    bool wasDragging = dragging;
+    bool wasDragging = dragging || fileDrop;
     pressPage = 0;
     dragging = false;
+    fileDrop = false;
     dropSlot = 0;
     dropLine = {};
     if (wasDragging) {
         Invalidate();
+    }
+}
+
+void ThumbnailPaletteCtrl::BeginFileDrop() {
+    EndPageDrag();
+    fileDrop = true;
+    HWND hwnd = GetHwnd();
+    if (hwnd) {
+        gThumbDragCtrl = this;
+        SetTimer(hwnd, kThumbDragTimerId, 30, ThumbDragTimerProc);
     }
 }
 
@@ -1172,12 +1186,19 @@ void ThumbnailPaletteCtrl::Paint(VirtPaintCtx& ctx) {
     VirtListBox::Paint(ctx);
     int left = 0;
     int top0 = 0;
-    if (!dragging || !GridOrigin(left, top0)) {
+    if ((!dragging && !fileDrop) || !GridOrigin(left, top0)) {
         return;
     }
     Gfx* gfx = ctx.gfx;
     Color accent = MkRgb(0, 120, 215);
     gfx->PushClip(ctx.clip.Intersect(ctx.bounds));
+    if (fileDrop) {
+        if (!dropLine.IsEmpty()) {
+            gfx->FillRect(dropLine, accent);
+        }
+        gfx->PopClip();
+        return;
+    }
     Rect src = PageRectInWindow(pressPage, left, top0);
     gfx->FillRects(&src, 1, GetColor(kColListBg), 170);
     if (!dropLine.IsEmpty()) {
@@ -1205,16 +1226,34 @@ void ThumbnailPaletteCtrl::Paint(VirtPaintCtx& ctx) {
     gfx->PopClip();
 }
 
-// after the pages were reordered in the document: move the thumbnails along
+// after pages were reordered, inserted or removed in the document (perm[newIdx]
+// = oldIdx, -1 for a new page): move the thumbnails along
 void ThumbnailPaletteCtrl::ReorderPages(const Vec<int>& perm, int pageNo) {
-    if (win->CurrentTab() != tab || len(perm) != pageCount || len(cache->thumbnails) != pageCount) {
+    if (win->CurrentTab() != tab || len(cache->thumbnails) != pageCount) {
         ResetForCurrentTab();
         return;
     }
     Vec<Pixmap*> old;
     VecAppendVec(old, cache->thumbnails);
-    for (int i = 0; i < pageCount; i++) {
-        cache->thumbnails[i] = old[perm[i]];
+    int n = len(perm);
+    VecReset(cache->thumbnails);
+    VecAppendBlanks(cache->thumbnails, n);
+    for (int i = 0; i < n; i++) {
+        int j = perm[i];
+        if (j >= 0 && j < len(old)) {
+            cache->thumbnails[i] = old[j];
+            old[j] = nullptr;
+        }
+    }
+    for (Pixmap* thumbnail : old) {
+        if (thumbnail) {
+            FreeThumbnail(thumbnail);
+        }
+    }
+    if (n != pageCount) {
+        pageCount = n;
+        rowsModel->rows = (pageCount + cols - 1) / cols;
+        SetModel(rowsModel);
     }
     // thumbnails being rendered are for the old order
     cache->orderGen++;
@@ -3447,4 +3486,156 @@ void SidebarThumbnailsReorder(VirtListBox* lb, const Vec<int>& perm, int pageNo)
         return;
     }
     ctrl->ReorderPages(perm, pageNo);
+}
+
+//--- dropping PDFs on the sidebar thumbnails inserts their pages
+
+static void DropFilesFromHDrop(HDROP hDrop, StrVec& files) {
+    int n = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
+    WCHAR pathW[MAX_PATH]{};
+    for (int i = 0; i < n; i++) {
+        DragQueryFileW(hDrop, i, pathW, dimof(pathW));
+        files.Append(ToUtf8Temp(pathW));
+    }
+}
+
+static bool GetHDrop(IDataObject* dataObj, STGMEDIUM& medium) {
+    FORMATETC fmt = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    return SUCCEEDED(dataObj->GetData(&fmt, &medium)) && medium.hGlobal;
+}
+
+static bool AllPdfs(const StrVec& files) {
+    if (len(files) == 0) {
+        return false;
+    }
+    for (Str path : files) {
+        if (!str::EndsWithI(path, StrL(".pdf"))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// PDFs over the thumbnails get a drop line and are inserted; anything else is
+// handed to the canvas, i.e. opened
+struct SidebarDropTarget : IDropTarget {
+    LONG refCount = 1;
+    MainWindow* win = nullptr;
+    bool inserting = false;
+
+    explicit SidebarDropTarget(MainWindow* w) : win(w) {}
+
+    ThumbnailPaletteCtrl* Thumbnails() {
+        auto* ctrl = (ThumbnailPaletteCtrl*)win->tocThumbnails;
+        if (!ctrl || !ctrl->IsVisible() || !CanInsertPagesInTab(win->CurrentTab())) {
+            return nullptr;
+        }
+        return ctrl;
+    }
+
+    void Track(POINTL pt) {
+        ThumbnailPaletteCtrl* ctrl = Thumbnails();
+        HWND hwnd = ctrl ? ctrl->GetHwnd() : nullptr;
+        if (!hwnd) {
+            return;
+        }
+        POINT p{pt.x, pt.y};
+        ScreenToClient(hwnd, &p);
+        ctrl->UpdateDrop({p.x, p.y});
+    }
+
+    void Stop() {
+        auto* ctrl = (ThumbnailPaletteCtrl*)win->tocThumbnails;
+        if (ctrl) {
+            ctrl->EndPageDrag();
+        }
+        inserting = false;
+    }
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refCount); }
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG n = InterlockedDecrement(&refCount);
+        if (n == 0) {
+            delete this;
+        }
+        return n;
+    }
+
+    STDMETHODIMP DragEnter(IDataObject* dataObj, DWORD, POINTL pt, DWORD* pdwEffect) override {
+        StrVec files;
+        STGMEDIUM medium{};
+        if (GetHDrop(dataObj, medium)) {
+            DropFilesFromHDrop((HDROP)medium.hGlobal, files);
+            ReleaseStgMedium(&medium);
+        }
+        *pdwEffect = len(files) > 0 ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        ThumbnailPaletteCtrl* ctrl = AllPdfs(files) ? Thumbnails() : nullptr;
+        if (!ctrl) {
+            return S_OK;
+        }
+        inserting = true;
+        ctrl->BeginFileDrop();
+        Track(pt);
+        return S_OK;
+    }
+
+    STDMETHODIMP DragOver(DWORD, POINTL pt, DWORD* pdwEffect) override {
+        *pdwEffect = DROPEFFECT_COPY;
+        if (inserting) {
+            Track(pt);
+        }
+        return S_OK;
+    }
+
+    STDMETHODIMP DragLeave() override {
+        Stop();
+        return S_OK;
+    }
+
+    STDMETHODIMP Drop(IDataObject* dataObj, DWORD, POINTL pt, DWORD* pdwEffect) override {
+        *pdwEffect = DROPEFFECT_COPY;
+        int slot = 0;
+        if (inserting) {
+            Track(pt);
+            auto* ctrl = (ThumbnailPaletteCtrl*)win->tocThumbnails;
+            slot = ctrl ? ctrl->dropSlot : 0;
+        }
+        Stop();
+
+        STGMEDIUM medium{};
+        if (!GetHDrop(dataObj, medium)) {
+            return S_OK;
+        }
+        HDROP hDrop = (HDROP)medium.hGlobal;
+        if (slot > 0) {
+            StrVec files;
+            DropFilesFromHDrop(hDrop, files);
+            ReleaseStgMedium(&medium);
+            InsertPdfsInTab(win->CurrentTab(), files, slot);
+            return S_OK;
+        }
+        // lp 1: the canvas must not DragFinish() it
+        SendMessageW(win->hwndCanvas, WM_DROPFILES, (WPARAM)hDrop, 1);
+        ReleaseStgMedium(&medium);
+        return S_OK;
+    }
+};
+
+void RegisterSidebarDropTarget(MainWindow* win) {
+    auto* dt = new SidebarDropTarget(win);
+    RegisterDragDrop(win->hwndTocBox, dt);
+    dt->Release(); // RegisterDragDrop AddRef'd it
+}
+
+void RevokeSidebarDropTarget(MainWindow* win) {
+    RevokeDragDrop(win->hwndTocBox);
 }

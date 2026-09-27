@@ -9612,6 +9612,11 @@ static void RemapTocPages(TocItem* item, const Vec<int>& inv) {
         int oldNo = item->pageNo;
         if (oldNo >= 1 && oldNo <= len(inv)) {
             int newNo = inv[oldNo - 1] + 1;
+            if (newNo < 1) {
+                // its page was removed: leave it be
+                RemapTocPages(item->child, inv);
+                continue;
+            }
             item->pageNo = newNo;
             item->loc = {1, newNo};
             // a dest may be shared by several items: only move it once
@@ -9625,9 +9630,56 @@ static void RemapTocPages(TocItem* item, const Vec<int>& inv) {
     }
 }
 
-// Bring our per-page state in line with the document's page tree after a page
-// move or its undo / redo. Caller holds pagesLock and renderLock.
-static void SyncPageOrder(EngineMupdf* e) {
+// Size of the page at idx (0-based) in the page tree. Caller holds docLock
+static RectF PdfPageMediabox(EngineMupdf* e, int idx) {
+    auto* ctx = e->Ctx();
+    fz_rect mbox{};
+    fz_var(mbox);
+    fz_try(ctx) {
+        fz_matrix ctm{};
+        pdf_page_obj_transform(ctx, pdf_lookup_page_obj(ctx, e->pdfdoc, idx), &mbox, &ctm);
+        mbox = fz_transform_rect(mbox, ctm);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        mbox = {};
+    }
+    if (fz_is_empty_rect(mbox)) {
+        return RectF(0, 0, 612, 792);
+    }
+    return ToRectF(mbox);
+}
+
+// a page that left the page tree (undo of an insert). Caller holds pagesLock
+// and renderLock
+static void FreeRemovedPage(EngineMupdf* e, FzPageInfo* pi, Vec<Annotation*>* removedOut) {
+    auto* ctx = e->Ctx();
+    InvalidateFzPageAfterContentChange(e, pi);
+    DeleteVecMembers(pi->comments);
+    for (Vec<Annotation*>* list : {&pi->annotations, &pi->widgets}) {
+        for (Annotation* a : *list) {
+            a->pdfannot = nullptr;
+            if (removedOut) {
+                VecAppend(*removedOut, a);
+            } else {
+                delete a;
+            }
+        }
+        VecReset(*list);
+    }
+    if (pi->page) {
+        AutoUnlockRecursiveMutex docScope(&e->docLock);
+        fz_drop_page(ctx, pi->page);
+        pi->page = nullptr;
+    }
+    pi->~FzPageInfo();
+}
+
+// Bring our per-page state in line with the document's page tree after pages
+// were moved or inserted, or that was undone / redone. Pages are matched by
+// object number; new ones get fresh state. Caller holds pagesLock and
+// renderLock.
+static void SyncPageOrder(EngineMupdf* e, Vec<Annotation*>* removedOut) {
     if (len(e->pageObjNums) == 0 || len(e->chapterPages) != 1) {
         return;
     }
@@ -9641,21 +9693,21 @@ static void SyncPageOrder(EngineMupdf* e) {
     }
     Vec<FzPageInfo*>* v = e->chapterPages[0];
     int n = len(nums);
-    if (!v || len(*v) != n || len(e->pageObjNums) != n) {
+    int nOld = len(e->pageObjNums);
+    if (!v || len(*v) != nOld || n == 0) {
         return;
     }
+
+    // perm[newIdx] = oldIdx, -1 for a page that wasn't there
     Vec<int> perm;
-    bool changed = false;
+    bool changed = n != nOld;
     for (int i = 0; i < n; i++) {
         int from = -1;
-        for (int j = 0; j < n; j++) {
+        for (int j = 0; j < nOld; j++) {
             if (e->pageObjNums[j] == nums[i]) {
                 from = j;
                 break;
             }
-        }
-        if (from < 0) {
-            return;
         }
         VecAppend(perm, from);
         changed |= from != i;
@@ -9667,12 +9719,22 @@ static void SyncPageOrder(EngineMupdf* e) {
     Vec<FzPageInfo*> old;
     VecAppendVec(old, *v);
     Vec<int> inv;
-    VecResize(inv, n);
+    VecResize(inv, nOld);
+    for (int j = 0; j < nOld; j++) {
+        inv[j] = -1;
+    }
+    VecResize(*v, n);
     for (int i = 0; i < n; i++) {
-        FzPageInfo* pi = old[perm[i]];
+        FzPageInfo* pi = nullptr;
+        if (perm[i] >= 0) {
+            pi = old[perm[i]];
+            inv[perm[i]] = i;
+        } else {
+            pi = New<FzPageInfo>(e->arena);
+            AutoUnlockRecursiveMutex docScope(&e->docLock);
+            pi->mediabox = PdfPageMediabox(e, i);
+        }
         (*v)[i] = pi;
-        inv[perm[i]] = i;
-        e->pageObjNums[i] = nums[i];
         pi->pageNo = i + 1;
         pi->loc = {1, i + 1};
         for (Annotation* a : pi->annotations) {
@@ -9682,6 +9744,15 @@ static void SyncPageOrder(EngineMupdf* e) {
             a->pageNo = i + 1;
         }
     }
+    for (int j = 0; j < nOld; j++) {
+        if (inv[j] < 0) {
+            FreeRemovedPage(e, old[j], removedOut);
+        }
+    }
+    VecReset(e->pageObjNums);
+    VecAppendVec(e->pageObjNums, nums);
+    e->pageCount = n;
+
     // every page: links on pages that stayed may point at pages that moved
     for (FzPageInfo* pi : *v) {
         if (pi->annotsLoaded) {
@@ -9720,9 +9791,13 @@ static void SyncPageOrder(EngineMupdf* e) {
 }
 
 // only a plain, journalled PDF: the page tree is the page order
-bool EngineMupdfCanMovePages(EngineBase* engine) {
+bool EngineMupdfCanEditPages(EngineBase* engine) {
     EngineMupdf* e = AsEngineMupdf(engine);
-    return e && e->pdfdoc && len(e->chapterPages) == 1 && e->journalNesting == 0 && e->PageCount() > 1;
+    return e && e->pdfdoc && len(e->chapterPages) == 1 && e->journalNesting == 0;
+}
+
+bool EngineMupdfCanMovePages(EngineBase* engine) {
+    return EngineMupdfCanEditPages(engine) && engine->PageCount() > 1;
 }
 
 // Move page fromPageNo in front of the page now at toSlot (pageCount + 1 puts
@@ -9777,8 +9852,72 @@ bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
         return false;
     }
     e->modifiedAnnotations = true;
-    SyncPageOrder(e);
+    SyncPageOrder(e, nullptr);
     return true;
+}
+
+// Insert every page of the PDF at path in front of the page now at toSlot
+// (pageCount + 1 appends). One undo step. Annotations of the inserted pages
+// aren't copied. Returns the number of pages inserted, 0 on failure.
+int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot) {
+    EngineMupdf* e = AsEngineMupdf(engine);
+    if (!EngineMupdfCanEditPages(engine)) {
+        return 0;
+    }
+    if (toSlot < 1 || toSlot > e->PageCount() + 1) {
+        return 0;
+    }
+    auto* ctx = e->Ctx();
+    AutoUnlockRecursiveMutex pagesScope(&e->pagesLock);
+    AutoUnlockMutex renderScope(&e->renderLock);
+    int nInserted = 0;
+    {
+        AutoUnlockRecursiveMutex docScope(&e->docLock);
+        if (len(e->pageObjNums) == 0 && !ReadPageObjNums(e, e->pageObjNums)) {
+            return 0;
+        }
+        pdf_document* doc = e->pdfdoc;
+        pdf_document* srcDoc = nullptr;
+        pdf_graft_map* map = nullptr;
+        fz_var(srcDoc);
+        fz_var(map);
+        fz_var(nInserted);
+        fz_try(ctx) {
+            srcDoc = pdf_open_document(ctx, path);
+            if (pdf_needs_password(ctx, srcDoc)) {
+                fz_throw(ctx, FZ_ERROR_ARGUMENT, "password protected");
+            }
+            int n = pdf_count_pages(ctx, srcDoc);
+            map = pdf_new_graft_map(ctx, doc);
+            pdf_begin_operation(ctx, doc, "Insert pages");
+            fz_try(ctx) {
+                for (int i = 0; i < n; i++) {
+                    pdf_graft_mapped_page(ctx, map, toSlot - 1 + i, srcDoc, i);
+                }
+                pdf_end_operation(ctx, doc);
+                nInserted = n;
+            }
+            fz_catch(ctx) {
+                pdf_abandon_operation(ctx, doc);
+                fz_rethrow(ctx);
+            }
+        }
+        fz_always(ctx) {
+            pdf_drop_graft_map(ctx, map);
+            pdf_drop_document(ctx, srcDoc);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("EngineMupdfInsertPdf: inserting '%s' failed\n", Str(path));
+            nInserted = 0;
+        }
+    }
+    if (nInserted == 0) {
+        return 0;
+    }
+    e->modifiedAnnotations = true;
+    SyncPageOrder(e, nullptr);
+    return nInserted;
 }
 
 // the reorder made by the last move / undo / redo, if any; perm[newIdx] = oldIdx
@@ -9840,7 +9979,7 @@ static void SyncPagesAfterUndoRedo(EngineMupdf* e, Vec<Annotation*>& removedOut)
         InvalidateFzPageAfterContentChange(e, pi);
         e->InvalidateTextForPage(pi->pageNo);
     });
-    SyncPageOrder(e);
+    SyncPageOrder(e, &removedOut);
 }
 
 // Step one operation back (or forward with redo). Returns false if there was

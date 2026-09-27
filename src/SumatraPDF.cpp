@@ -3424,6 +3424,7 @@ static MainWindow* CreateMainWindow() {
     UpdateFindbox(win);
     if (CanAccessDisk() && !gPluginMode) {
         RegisterCanvasDropTarget(win->hwndCanvas);
+        RegisterSidebarDropTarget(win);
     }
 
     if (len(gWindows) == 0) {
@@ -3644,6 +3645,7 @@ void DeleteMainWindow(MainWindow* win) {
     DeletePropertiesWindow(win->hwndFrame);
     DestroyToolbar(win);
     RevokeCanvasDropTarget(win->hwndCanvas);
+    RevokeSidebarDropTarget(win);
 
     ReportIf(win->findThread && WaitForSingleObject(win->findThread, 0) == WAIT_TIMEOUT);
     ReportIf(win->printThread && WaitForSingleObject(win->printThread, 0) == WAIT_TIMEOUT);
@@ -11911,6 +11913,41 @@ void MovePageInTab(WindowTab* tab, int fromPageNo, int toSlot) {
     }
     int newPageNo = toSlot <= fromPageNo ? toSlot : toSlot - 1;
     ApplyPageReorder(tab, newPageNo);
+}
+
+bool CanInsertPagesInTab(WindowTab* tab) {
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    if (!dm || !tab->win || tab->win->CurrentTab() != tab) {
+        return false;
+    }
+    return EngineMupdfCanEditPages(dm->GetEngine());
+}
+
+// insert all pages of each PDF in front of the page now at toSlot, in order;
+// one undo step per file
+void InsertPdfsInTab(WindowTab* tab, const StrVec& paths, int toSlot) {
+    if (!CanInsertPagesInTab(tab)) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    DisplayModel* dm = tab->AsFixed();
+    CancelAnnotationPlacement(win);
+    CancelDrag(win);
+    SetSelectedAnnotation(tab, nullptr);
+    int firstSlot = toSlot;
+    for (Str path : paths) {
+        if (gRenderCache) {
+            gRenderCache->AbortRendering(dm);
+        }
+        int n = EngineMupdfInsertPdf(dm->GetEngine(), CStrTemp(path), toSlot);
+        if (n == 0) {
+            TempStr msg = fmt(Tr("Couldn't insert pages from %s").s, path::GetBaseNameTemp(path));
+            ShowWarningNotification(win->hwndCanvas, msg, kNotif5SecsTimeOut);
+            continue;
+        }
+        toSlot += n;
+        ApplyPageReorder(tab, firstSlot);
+    }
 }
 
 static void UndoRedoInTab(WindowTab* tab, bool redo) {

@@ -298,6 +298,8 @@ EXPORTS
 
 	pdf_graft_mapped_object
 
+	pdf_graft_mapped_page
+
 	pdf_add_object
 
 	pdf_flatten_inheritable_page_items
