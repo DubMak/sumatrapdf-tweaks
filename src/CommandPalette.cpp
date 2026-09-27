@@ -364,6 +364,8 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     Rect dropLine;
     // files are dragged over the thumbnails from outside: only the drop line
     bool fileDrop = false;
+    // split view: the other side's thumbnails the dragged page would be copied to
+    ThumbnailPaletteCtrl* peerDrop = nullptr;
 
     ThumbnailPaletteCtrl(MainWindow*, PlatformFont*, int dpi, bool sidebarMode = false);
     ~ThumbnailPaletteCtrl() override;
@@ -391,6 +393,11 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void EndPageDrag();
 
   private:
+    void StartDragTimer();
+    void StopDragTimer();
+    void MoveGhost(Point ptWindow);
+    ThumbnailPaletteCtrl* SplitPeerAt(Point ptWindow, Point& ptPeer);
+    void TrackPageDrag(Point ptWindow);
     bool GridOrigin(int& left, int& top0);
     Rect PageRectInWindow(int pageNo, int left, int top0);
     void OnThumbCaptureLost();
@@ -409,6 +416,57 @@ static ThumbnailPaletteCtrl* gThumbDragCtrl = nullptr;
 static void CALLBACK ThumbDragTimerProc(HWND, UINT, UINT_PTR, DWORD) {
     if (gThumbDragCtrl) {
         gThumbDragCtrl->AutoScrollDrag();
+    }
+}
+
+// the dragged page follows the cursor in a click-through popup so it shows
+// over the canvas and the other split side, not just inside the sidebar
+static HWND gThumbGhostHwnd = nullptr;
+static ThumbnailPaletteCtrl* gThumbGhostCtrl = nullptr;
+constexpr BYTE kThumbGhostAlpha = 190;
+
+static Pixmap* ThumbnailToDraw(ThumbnailPaletteCache* cache, int idx);
+
+static void PaintThumbGhost(HWND hwnd) {
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    FillRect(hdc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
+    ThumbnailPaletteCtrl* ctrl = gThumbGhostCtrl;
+    Pixmap* thumbnail = ctrl ? ThumbnailToDraw(ctrl->cache, ctrl->pressPage - 1) : nullptr;
+    if (thumbnail) {
+        int dx = rc.right;
+        int dy = rc.bottom;
+        int drawDx = std::min(dx, (thumbnail->width * 3) / 4);
+        int drawDy = std::min(dy, (thumbnail->height * 3) / 4);
+        BlitPixmap(thumbnail, hdc, {(dx - drawDx) / 2, (dy - drawDy) / 2, drawDx, drawDy});
+    }
+    HBRUSH accent = CreateSolidBrush(RGB(0, 120, 215));
+    for (int i = 0; i < 2; i++) {
+        RECT r{i, i, rc.right - i, rc.bottom - i};
+        FrameRect(hdc, &r, accent);
+    }
+    DeleteObject(accent);
+    EndPaint(hwnd, &ps);
+}
+
+static LRESULT CALLBACK WndProcThumbGhost(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_NCHITTEST) {
+        return HTTRANSPARENT;
+    }
+    if (msg == WM_PAINT) {
+        PaintThumbGhost(hwnd);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+static void HideThumbGhost() {
+    gThumbGhostCtrl = nullptr;
+    if (gThumbGhostHwnd) {
+        DestroyWindow(gThumbGhostHwnd);
+        gThumbGhostHwnd = nullptr;
     }
 }
 
@@ -862,13 +920,9 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
                 return;
             }
             dragging = true;
-            HWND hwnd = GetHwnd();
-            if (hwnd) {
-                gThumbDragCtrl = this;
-                SetTimer(hwnd, kThumbDragTimerId, 30, ThumbDragTimerProc);
-            }
+            StartDragTimer();
         }
-        UpdateDrop(ev->ptWindow);
+        TrackPageDrag(ev->ptWindow);
         ev->didHandle = true;
         return;
     }
@@ -890,9 +944,15 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
 void ThumbnailPaletteCtrl::OnThumbMouseUp(VirtMouseEvent* ev) {
     if (pressPage > 0) {
         int fromPage = pressPage;
-        int slot = dragging ? dropSlot : 0;
+        ThumbnailPaletteCtrl* peer = peerDrop;
+        WindowTab* peerTab = peer ? peer->win->CurrentTab() : nullptr;
+        int slot = peer ? peer->dropSlot : (dragging ? dropSlot : 0);
         EndPageDrag();
-        if (slot > 0 && slot != fromPage && slot != fromPage + 1) {
+        if (peer) {
+            if (slot > 0) {
+                InsertPageFromTab(peerTab, tab, fromPage, slot);
+            }
+        } else if (slot > 0 && slot != fromPage && slot != fromPage + 1) {
             MovePageInTab(tab, fromPage, slot);
         }
         ev->didHandle = true;
@@ -1146,13 +1206,120 @@ void ThumbnailPaletteCtrl::AutoScrollDrag() {
     }
 }
 
-void ThumbnailPaletteCtrl::EndPageDrag() {
-    if (gThumbDragCtrl == this) {
-        HWND hwnd = GetHwnd();
-        if (hwnd) {
-            KillTimer(hwnd, kThumbDragTimerId);
+// show the dragged page at the cursor, scaled like the old in-sidebar ghost
+void ThumbnailPaletteCtrl::MoveGhost(Point ptWindow) {
+    HWND hwnd = GetHwnd();
+    if (!hwnd) {
+        return;
+    }
+    int ghostDx = std::max(1, (thumbDx * 3) / 4);
+    int ghostDy = std::max(1, (thumbDy * 3) / 4);
+    POINT p{ptWindow.x - ((grabOffset.x * 3) / 4), ptWindow.y - ((grabOffset.y * 3) / 4)};
+    ClientToScreen(hwnd, &p);
+    if (!gThumbGhostHwnd) {
+        static const WCHAR* kClass = L"SUMATRA_PDF_THUMB_GHOST";
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = WndProcThumbGhost;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = kClass;
+            registered = RegisterClassExW(&wc) != 0;
         }
-        gThumbDragCtrl = nullptr;
+        DWORD exStyle = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        HWND owner = GetAncestor(hwnd, GA_ROOT);
+        gThumbGhostHwnd = CreateWindowExW(exStyle, kClass, L"", WS_POPUP, p.x, p.y, ghostDx, ghostDy, owner, nullptr,
+                                          GetModuleHandleW(nullptr), nullptr);
+        if (!gThumbGhostHwnd) {
+            return;
+        }
+        SetLayeredWindowAttributes(gThumbGhostHwnd, 0, kThumbGhostAlpha, LWA_ALPHA);
+    }
+    gThumbGhostCtrl = this;
+    UINT flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW;
+    SetWindowPos(gThumbGhostHwnd, nullptr, p.x, p.y, ghostDx, ghostDy, flags);
+}
+
+void ThumbnailPaletteCtrl::StartDragTimer() {
+    HWND hwnd = GetHwnd();
+    if (hwnd) {
+        gThumbDragCtrl = this;
+        SetTimer(hwnd, kThumbDragTimerId, 30, ThumbDragTimerProc);
+    }
+}
+
+void ThumbnailPaletteCtrl::StopDragTimer() {
+    if (gThumbDragCtrl != this) {
+        return;
+    }
+    HWND hwnd = GetHwnd();
+    if (hwnd) {
+        KillTimer(hwnd, kThumbDragTimerId);
+    }
+    gThumbDragCtrl = nullptr;
+}
+
+// in split view, the other side's thumbnails under ptWindow (our window coords)
+// if a page can be inserted there; ptPeer is the point in its window coords
+ThumbnailPaletteCtrl* ThumbnailPaletteCtrl::SplitPeerAt(Point ptWindow, Point& ptPeer) {
+    MainWindow* other = win->splitHost ? win->splitHost : win->splitPane;
+    if (!other || !IsWindowVisible(other->hwndFrame)) {
+        return nullptr;
+    }
+    auto* peer = (ThumbnailPaletteCtrl*)other->tocThumbnails;
+    HWND hwnd = GetHwnd();
+    HWND peerHwnd = peer ? peer->GetHwnd() : nullptr;
+    if (!hwnd || !peerHwnd || !peer->IsVisible() || !IsWindowVisible(peerHwnd)) {
+        return nullptr;
+    }
+    if (!CanInsertPagesInTab(other->CurrentTab())) {
+        return nullptr;
+    }
+    POINT p{ptWindow.x, ptWindow.y};
+    MapWindowPoints(hwnd, peerHwnd, &p, 1);
+    ptPeer = {p.x, p.y};
+    return peer->BoundsInWindow().Contains(ptPeer) ? peer : nullptr;
+}
+
+// the dragged page shows its drop line here, or on the other split side's
+// thumbnails (copied there on release)
+void ThumbnailPaletteCtrl::TrackPageDrag(Point ptWindow) {
+    MoveGhost(ptWindow);
+    Point ptPeer;
+    ThumbnailPaletteCtrl* peer = SplitPeerAt(ptWindow, ptPeer);
+    if (peer != peerDrop) {
+        if (peerDrop) {
+            peerDrop->EndPageDrag();
+            peerDrop = nullptr;
+            StartDragTimer();
+        }
+        if (peer) {
+            StopDragTimer();
+            peer->BeginFileDrop();
+            peerDrop = peer;
+        }
+    }
+    if (!peer) {
+        UpdateDrop(ptWindow);
+        return;
+    }
+    peer->UpdateDrop(ptPeer);
+    dragPt = ptWindow;
+    dropSlot = 0;
+    dropLine = {};
+    Invalidate();
+}
+
+void ThumbnailPaletteCtrl::EndPageDrag() {
+    StopDragTimer();
+    if (gThumbGhostCtrl == this) {
+        HideThumbGhost();
+    }
+    if (peerDrop) {
+        ThumbnailPaletteCtrl* peer = peerDrop;
+        peerDrop = nullptr;
+        peer->EndPageDrag();
     }
     bool wasDragging = dragging || fileDrop;
     pressPage = 0;
@@ -1168,11 +1335,7 @@ void ThumbnailPaletteCtrl::EndPageDrag() {
 void ThumbnailPaletteCtrl::BeginFileDrop() {
     EndPageDrag();
     fileDrop = true;
-    HWND hwnd = GetHwnd();
-    if (hwnd) {
-        gThumbDragCtrl = this;
-        SetTimer(hwnd, kThumbDragTimerId, 30, ThumbDragTimerProc);
-    }
+    StartDragTimer();
 }
 
 void ThumbnailPaletteCtrl::OnThumbCaptureLost() {
@@ -1199,30 +1362,12 @@ void ThumbnailPaletteCtrl::Paint(VirtPaintCtx& ctx) {
         gfx->PopClip();
         return;
     }
+    // the ghost itself is a popup (MoveGhost)
     Rect src = PageRectInWindow(pressPage, left, top0);
     gfx->FillRects(&src, 1, GetColor(kColListBg), 170);
     if (!dropLine.IsEmpty()) {
         gfx->FillRect(dropLine, accent);
     }
-
-    int ghostDx = std::max(1, (thumbDx * 3) / 4);
-    int ghostDy = std::max(1, (thumbDy * 3) / 4);
-    Rect ghost{dragPt.x - ((grabOffset.x * 3) / 4), dragPt.y - ((grabOffset.y * 3) / 4), ghostDx, ghostDy};
-    int shadow = DpiScaleByDpi(dpi, 4);
-    Rect shadowRect = ghost;
-    shadowRect.Offset(shadow, shadow);
-    gfx->FillRects(&shadowRect, 1, MkRgb(0, 0, 0), 50);
-    gfx->FillRect(ghost, kColWhite);
-    Pixmap* thumbnail = ThumbnailToDraw(cache, pressPage - 1);
-    if (thumbnail) {
-        int drawDx = (std::min(thumbnail->width, thumbDx) * 3) / 4;
-        int drawDy = (std::min(thumbnail->height, thumbDy) * 3) / 4;
-        Rect target{ghost.x + ((ghostDx - drawDx) / 2), ghost.y + ((ghostDy - drawDy) / 2), drawDx, drawDy};
-        gfx->DrawPixmap(thumbnail, target);
-    }
-    // see-through look
-    gfx->FillRects(&ghost, 1, kColWhite, 80);
-    gfx->DrawRect(ghost, accent, 2);
     gfx->PopClip();
 }
 

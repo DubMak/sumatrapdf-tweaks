@@ -12420,6 +12420,38 @@ void InsertPdfsInTab(WindowTab* tab, const StrVec& paths, int toSlot) {
     }
 }
 
+// copy page pageNo of src (with its unsaved edits) in front of the page now
+// at toSlot in dst; one undo step. Used by dragging thumbnails across split view
+void InsertPageFromTab(WindowTab* dst, WindowTab* src, int pageNo, int toSlot) {
+    DisplayModel* srcDm = src ? src->AsFixed() : nullptr;
+    if (!srcDm || !CanInsertPagesInTab(dst)) {
+        return;
+    }
+    MainWindow* win = dst->win;
+    DisplayModel* dm = dst->AsFixed();
+    CancelAnnotationPlacement(win);
+    CancelDrag(win);
+    SetSelectedAnnotation(dst, nullptr);
+    if (gRenderCache) {
+        gRenderCache->AbortRendering(dm);
+    }
+
+    // grafting re-opens the source, so snapshot its live state to a temp file
+    TempStr tmpPath = GetTempFilePathTemp(StrL("SumPg"));
+    int n = 0;
+    if (tmpPath && EngineMupdfSaveCopy(srcDm->GetEngine(), tmpPath)) {
+        n = EngineMupdfInsertPdf(dm->GetEngine(), CStrTemp(tmpPath), toSlot, pageNo, 1);
+    }
+    if (tmpPath) {
+        file::Delete(tmpPath);
+    }
+    if (n == 0) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Couldn't insert the page"), kNotif5SecsTimeOut);
+        return;
+    }
+    ApplyPageReorder(dst, toSlot);
+}
+
 static void UndoRedoInTab(WindowTab* tab, bool redo) {
     if (!tab) {
         return;

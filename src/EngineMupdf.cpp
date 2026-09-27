@@ -9856,10 +9856,10 @@ bool EngineMupdfMovePage(EngineBase* engine, int fromPageNo, int toSlot) {
     return true;
 }
 
-// Insert every page of the PDF at path in front of the page now at toSlot
-// (pageCount + 1 appends). One undo step. Annotations and form fields of the
+// Insert nPages pages (-1: all) starting at fromPageNo of the PDF at path in
+// front of the page now at toSlot (pageCount + 1 appends). One undo step. Annotations and form fields of the
 // inserted pages are flattened into their content. Returns the number of pages inserted, 0 on failure.
-int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot) {
+int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot, int fromPageNo, int nPages) {
     EngineMupdf* e = AsEngineMupdf(engine);
     if (!EngineMupdfCanEditPages(engine)) {
         return 0;
@@ -9890,12 +9890,17 @@ int EngineMupdfInsertPdf(EngineBase* engine, const char* path, int toSlot) {
             // grafting only copies page content: bake annotations and form
             // fields into it first (in memory, the file isn't touched)
             pdf_bake_document(ctx, srcDoc, 1, 1);
-            int n = pdf_count_pages(ctx, srcDoc);
+            int srcCount = pdf_count_pages(ctx, srcDoc);
+            int first = fromPageNo - 1;
+            int n = nPages < 0 ? srcCount - first : nPages;
+            if (first < 0 || n < 1 || first + n > srcCount) {
+                fz_throw(ctx, FZ_ERROR_ARGUMENT, "bad page range");
+            }
             map = pdf_new_graft_map(ctx, doc);
             pdf_begin_operation(ctx, doc, "Insert pages");
             fz_try(ctx) {
                 for (int i = 0; i < n; i++) {
-                    pdf_graft_mapped_page(ctx, map, toSlot - 1 + i, srcDoc, i);
+                    pdf_graft_mapped_page(ctx, map, toSlot - 1 + i, srcDoc, first + i);
                 }
                 pdf_end_operation(ctx, doc);
                 nInserted = n;
