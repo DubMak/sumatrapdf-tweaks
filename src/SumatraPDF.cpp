@@ -6592,6 +6592,167 @@ bool SplitViewIsFocusedSide(MainWindow* win) {
     return isRight == host->splitRightFocused;
 }
 
+//--- split view drop zones: a tab dragged onto a half of the document, or a
+// file dropped on its right edge, opens a split view
+//
+//   tab drag:  +-----------+-----------+    file drop:  +---------------+-----+
+//              |   left    |   right   |                |               |right|
+//              +-----------+-----------+                +---------------+-----+
+
+constexpr int kSplitDropHintAlpha = 70;
+static HWND gSplitDropHint = nullptr;
+
+static Rect CanvasScreenRect(MainWindow* win) {
+    Rect r = HwndClientRect(win->hwndCanvas);
+    Point p = HwndClientToScreen(win->hwndCanvas, {r.x, r.y});
+    return {p.x, p.y, r.dx, r.dy};
+}
+
+// the document area of host's side: its canvas, or both sides when split
+static Rect SplitDropArea(MainWindow* host, SplitDropSide side) {
+    Rect r = CanvasScreenRect(host);
+    if (IsSplitShowing(host)) {
+        return side == SplitDropSide::Right ? CanvasScreenRect(host->splitPane) : r;
+    }
+    int half = r.dx / 2;
+    if (side == SplitDropSide::Right) {
+        return {r.x + half, r.y, r.dx - half, r.dy};
+    }
+    return {r.x, r.y, half, r.dy};
+}
+
+// tints where the dragged document would land; SplitDropSide::None hides it
+void SplitViewShowDropHint(MainWindow* win, SplitDropSide side) {
+    MainWindow* host = SplitViewHostOf(win);
+    if (side == SplitDropSide::None || !IsMainWindowValidAndNotClosing(host)) {
+        if (gSplitDropHint) {
+            ShowWindow(gSplitDropHint, SW_HIDE);
+        }
+        return;
+    }
+    if (!gSplitDropHint) {
+        static ATOM atom = 0;
+        const WCHAR* cls = L"SumatraSplitDropHint";
+        if (!atom) {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = cls;
+            wc.hbrBackground = CreateSolidBrush(SysHighlightBgColor());
+            atom = RegisterClassExW(&wc);
+        }
+        DWORD exStyle = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        gSplitDropHint = CreateWindowExW(exStyle, cls, L"", WS_POPUP, 0, 0, 0, 0, host->hwndFrame, nullptr,
+                                         GetModuleHandleW(nullptr), nullptr);
+        if (!gSplitDropHint) {
+            return;
+        }
+        SetLayeredWindowAttributes(gSplitDropHint, 0, kSplitDropHintAlpha, LWA_ALPHA);
+    }
+    // owned by the frame so it stays above it
+    SetWindowLongPtrW(gSplitDropHint, GWLP_HWNDPARENT, (LONG_PTR)host->hwndFrame);
+    Rect r = SplitDropArea(host, side);
+    SetWindowPos(gSplitDropHint, HWND_TOP, r.x, r.y, r.dx, r.dy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+// the tab shown before tab was picked up for dragging (clicking it selected it)
+static WindowTab* PrevDocumentTab(MainWindow* host, WindowTab* tab) {
+    Vec<WindowTab*>& history = *host->tabSelectionHistory;
+    for (int i = len(history) - 1; i >= 0; i--) {
+        WindowTab* t = history[i];
+        if (t != tab && t != host->splitPeerTab && host->GetTabIdx(t) >= 0 && !t->IsNonDocumentTab() && t->ctrl) {
+            return t;
+        }
+    }
+    return nullptr;
+}
+
+// the dragged (current) tab can be split with the tab shown before it
+static bool CanSplitDraggedTab(MainWindow* host, WindowTab* tab) {
+    if (!IsMainWindowValidAndNotClosing(host) || !tab || host->GetTabIdx(tab) < 0) {
+        return false;
+    }
+    if (tab->IsNonDocumentTab() || tab == host->splitPeerTab || tab == host->splitLeftTab) {
+        return false;
+    }
+    return host->CurrentTab() == tab && PrevDocumentTab(host, tab);
+}
+
+// which half of host's document the dragged tab is over, if it can split there
+SplitDropSide SplitViewTabDropSide(MainWindow* win, WindowTab* tab, Point screenPt) {
+    MainWindow* host = SplitViewHostOf(win);
+    if (!CanSplitDraggedTab(host, tab)) {
+        return SplitDropSide::None;
+    }
+    Rect r = CanvasScreenRect(host);
+    if (!r.Contains(screenPt)) {
+        return SplitDropSide::None;
+    }
+    return screenPt.x < r.x + r.dx / 2 ? SplitDropSide::Left : SplitDropSide::Right;
+}
+
+// the dragged (current) tab goes to side; the tab shown before it to the other
+void SplitViewDropTab(MainWindow* win, WindowTab* tab, SplitDropSide side) {
+    MainWindow* host = SplitViewHostOf(win);
+    if (side == SplitDropSide::None || !CanSplitDraggedTab(host, tab)) {
+        return;
+    }
+    WindowTab* prev = PrevDocumentTab(host, tab);
+    if (side == SplitDropSide::Left) {
+        SplitViewStart(host, prev);
+        return;
+    }
+    TabsSelect(host, host->GetTabIdx(prev));
+    if (host->CurrentTab() == prev) {
+        SplitViewStart(host, tab);
+    }
+}
+
+// a single file dragged over the right edge of the document opens on the right
+SplitDropSide SplitViewFileDropSide(MainWindow* win, Point screenPt) {
+    MainWindow* host = SplitViewHostOf(win);
+    if (!IsMainWindowValidAndNotClosing(host)) {
+        return SplitDropSide::None;
+    }
+    WindowTab* cur = host->CurrentTab();
+    if (!cur || cur->IsNonDocumentTab() || !cur->ctrl) {
+        return SplitDropSide::None;
+    }
+    Rect r = IsSplitShowing(host) ? CanvasScreenRect(host->splitPane) : CanvasScreenRect(host);
+    int zoneDx = r.dx / 3;
+    Rect zone = {r.x + r.dx - zoneDx, r.y, zoneDx, r.dy};
+    return zone.Contains(screenPt) ? SplitDropSide::Right : SplitDropSide::None;
+}
+
+// open path next to the current document (replacing the right side if split)
+void SplitViewDropFile(MainWindow* win, Str path) {
+    MainWindow* host = SplitViewHostOf(win);
+    if (!IsMainWindowValidAndNotClosing(host)) {
+        return;
+    }
+    WindowTab* left = host->CurrentTab();
+    if (!left || left->IsNonDocumentTab()) {
+        return;
+    }
+    LoadArgs args(path, host);
+    args.showWin = true;
+    args.noPlaceWindow = true;
+    LoadDocument(&args);
+    if (!IsMainWindowValidAndNotClosing(host)) {
+        return;
+    }
+    WindowTab* opened = host->CurrentTab();
+    int leftIdx = host->GetTabIdx(left);
+    if (!opened || opened == left || leftIdx < 0 || !path::IsSame(opened->filePath, path)) {
+        return;
+    }
+    TabsSelect(host, leftIdx);
+    if (host->CurrentTab() == left) {
+        SplitViewStart(host, opened);
+    }
+}
+
 // follow the keyboard focus between the sides of a split view, so the
 // accent line shows where shortcuts (Ctrl+S, ...) go
 static void SplitViewTrackFocus() {
@@ -12971,6 +13132,15 @@ static LRESULT FrameOnCommand(MainWindow* win, HWND hwnd, UINT msg, WPARAM wp, L
         case CmdCloseSplitView:
             SplitViewEnd(win->splitHost ? win->splitHost : win, true, true);
             break;
+
+        case CmdToggleSplitView: {
+            MainWindow* host = SplitViewHostOf(win);
+            if (host && host->splitPane) {
+                SplitViewEnd(host, true, true);
+            } else {
+                SplitViewStartDefault(win);
+            }
+        } break;
 
         case CmdMoveTabRight:
         case CmdMoveTabLeft: {

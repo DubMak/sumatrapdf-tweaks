@@ -162,6 +162,16 @@ void SplitViewStartDefault(MainWindow* win);
 bool SplitViewEnd(MainWindow* host, bool reopenPeer, bool selectLeft);
 void SplitViewFocusPane(MainWindow* host);
 bool SplitViewIsFocusedSide(MainWindow* win);
+enum class SplitDropSide {
+    None,
+    Left,
+    Right
+};
+void SplitViewShowDropHint(MainWindow* win, SplitDropSide side);
+SplitDropSide SplitViewTabDropSide(MainWindow* win, WindowTab* tab, Point screenPt);
+void SplitViewDropTab(MainWindow* win, WindowTab* tab, SplitDropSide side);
+SplitDropSide SplitViewFileDropSide(MainWindow* win, Point screenPt);
+void SplitViewDropFile(MainWindow* win, Str path);
 void PostAppExit();
 enum class SidebarResizeFrame {
     Keep,

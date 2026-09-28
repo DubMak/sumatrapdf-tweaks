@@ -339,6 +339,7 @@ static SeqStrings gCommandNames =
     "CmdSave\0"
     "CmdSplitWithCurrentTab\0"
     "CmdCloseSplitView\0"
+    "CmdToggleSplitView\0"
     "\0";
 
 static i32 gCommandIds[] = {
@@ -667,6 +668,7 @@ static i32 gCommandIds[] = {
     CmdSave,
     CmdSplitWithCurrentTab,
     CmdCloseSplitView,
+    CmdToggleSplitView,
 };
 
 SeqStrings gCommandDescriptions =
@@ -995,6 +997,7 @@ SeqStrings gCommandDescriptions =
     "Save\0"
     "Split With Current Tab\0"
     "Close Split View\0"
+    "Toggle Split View\0"
     "\0";
 
 SeqStrings gCommandAltDescs =

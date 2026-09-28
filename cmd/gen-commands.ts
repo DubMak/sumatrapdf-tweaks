@@ -341,6 +341,7 @@ const commandsRaw = [
     "CmdSave", "Save",
     "CmdSplitWithCurrentTab", "Split With Current Tab",
     "CmdCloseSplitView", "Close Split View",
+    "CmdToggleSplitView", "Toggle Split View",
 ];
 
 // removed slots are dropped: nothing outside the generators should see them

@@ -85,11 +85,20 @@ struct TabsCtrl : VirtCtrl {
         int tab2 = -1;
     };
 
+    // a tab dragged out of the tab strip moved (screenPt) or the drag ended
+    struct DragMoveEvent {
+        TabsCtrl* tabs = nullptr;
+        int tabIdx = -1;
+        Point screenPt;
+        bool ended = false;
+    };
+
     using SelectionChangingHandler = Func1<SelectionChangingEvent*>;
     using SelectionChangedHandler = Func1<SelectionChangedEvent*>;
     using ClosedHandler = Func1<ClosedEvent*>;
     using MigrationHandler = Func1<MigrationEvent*>;
     using DraggedHandler = Func1<DraggedEvent*>;
+    using DragMoveHandler = Func1<DragMoveEvent*>;
 
     // host HWND (child of the frame); GetHwnd() also returns this once attached
     HWND hwnd = nullptr;
@@ -129,6 +138,7 @@ struct TabsCtrl : VirtCtrl {
     SelectionChangedHandler onSelectionChanged;
     MigrationHandler onTabMigration;
     DraggedHandler onTabDragged;
+    DragMoveHandler onTabDragMove;
 
     // colors: kColTab* (the unselected and hovered shades are derived from
     // kColTabBg; a tab with a TabInfo::tabColor of its own overrides it)

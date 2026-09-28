@@ -625,6 +625,18 @@ HBITMAP TabsCtrl::RenderForDragging(int idx) {
     return ret;
 }
 
+static void TriggerTabDragMove(TabsCtrl* tabs, Point screenPt, bool ended) {
+    if (!tabs->onTabDragMove.IsValid()) {
+        return;
+    }
+    TabsCtrl::DragMoveEvent ev;
+    ev.tabs = tabs;
+    ev.tabIdx = tabs->selectedIdx;
+    ev.screenPt = screenPt;
+    ev.ended = ended;
+    tabs->onTabDragMove.Call(&ev);
+}
+
 // must be called after LayoutTabs()
 static void TabsCtrlUpdateAfterChangingTabsCount(TabsCtrl* tabs) {
     HWND hwnd = tabs->hwnd;
@@ -642,6 +654,7 @@ static void TabsCtrlUpdateAfterChangingTabsCount(TabsCtrl* tabs) {
     if (tabs->draggingTab) {
         tabs->draggingTab = false;
         ImageList_EndDrag();
+        TriggerTabDragMove(tabs, {}, true);
     }
 }
 
@@ -807,6 +820,7 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (draggingTab && msg == WM_MOUSEMOVE) {
         Point p = HwndMapWindowPoint(hwnd, nullptr, mousePos);
         ImageList_DragMove(p.x, p.y);
+        TriggerTabDragMove(this, p, false);
         return 0;
     }
 
@@ -949,6 +963,7 @@ LRESULT TabsCtrl::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             draggingTab = false;
             ImageList_EndDrag();
+            TriggerTabDragMove(this, {}, true);
             int selectedTab = selectedIdx;
             if (tabUnderMouse < 0) {
                 // migrate to new/different window

@@ -1024,7 +1024,9 @@ void ThumbnailPaletteCtrl::OnThumbMouseDown(VirtMouseEvent* ev) {
             // page (or all selected pages) up
             int left = 0;
             int top0 = 0;
-            if (root && leftButton && IsPageSelected(pageNo) && CanMovePagesInTab(tab) && GridOrigin(left, top0)) {
+            // a single page can't move, but can still be copied to the other split side
+            bool canPick = CanMovePagesInTab(tab) || CanInsertPagesInTab(tab);
+            if (root && leftButton && IsPageSelected(pageNo) && canPick && GridOrigin(left, top0)) {
                 pressPage = pageNo;
                 VecClear(dragPages);
                 if (len(selPages) > 0) {

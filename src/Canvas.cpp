@@ -6071,9 +6071,32 @@ static bool DataObjectHasUrl(IDataObject* dataObj) {
     return false;
 }
 
+static int DataObjectFileCount(IDataObject* dataObj) {
+    FORMATETC fmt = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+    STGMEDIUM medium{};
+    if (FAILED(dataObj->GetData(&fmt, &medium)) || !medium.hGlobal) {
+        return 0;
+    }
+    int n = (int)DragQueryFileW((HDROP)medium.hGlobal, 0xFFFFFFFF, nullptr, 0);
+    ReleaseStgMedium(&medium);
+    return n;
+}
+
 class CanvasDropTarget : public IDropTarget {
     AtomicInt refCount = 1;
     HWND hwnd = nullptr;
+    // a single file is dragged: over the right edge it opens in a split view
+    bool singleFile = false;
+
+    SplitDropSide UpdateSplitHint(POINTL pt) {
+        MainWindow* win = FindMainWindowByHwnd(hwnd);
+        SplitDropSide side = SplitDropSide::None;
+        if (win && singleFile) {
+            side = SplitViewFileDropSide(win, {pt.x, pt.y});
+        }
+        SplitViewShowDropHint(win, side);
+        return side;
+    }
 
   public:
     explicit CanvasDropTarget(HWND h) : hwnd(h) {}
@@ -6098,23 +6121,31 @@ class CanvasDropTarget : public IDropTarget {
 
     STDMETHODIMP DragEnter(IDataObject* dataObj, __unused DWORD grfKeyState, __unused POINTL pt,
                            DWORD* pdwEffect) override {
+        singleFile = DataObjectFileCount(dataObj) == 1;
         if (DataObjectHasFiles(dataObj) || DataObjectHasUrl(dataObj)) {
             *pdwEffect = DROPEFFECT_COPY;
+            UpdateSplitHint(pt);
         } else {
             *pdwEffect = DROPEFFECT_NONE;
         }
         return S_OK;
     }
 
-    STDMETHODIMP DragOver(__unused DWORD grfKeyState, __unused POINTL pt, DWORD* pdwEffect) override {
+    STDMETHODIMP DragOver(__unused DWORD grfKeyState, POINTL pt, DWORD* pdwEffect) override {
         *pdwEffect = DROPEFFECT_COPY;
+        UpdateSplitHint(pt);
         return S_OK;
     }
 
-    STDMETHODIMP DragLeave() override { return S_OK; }
+    STDMETHODIMP DragLeave() override {
+        SplitViewShowDropHint(nullptr, SplitDropSide::None);
+        return S_OK;
+    }
 
-    STDMETHODIMP Drop(IDataObject* dataObj, DWORD /*grfKeyState*/, __unused POINTL pt, DWORD* pdwEffect) override {
+    STDMETHODIMP Drop(IDataObject* dataObj, DWORD /*grfKeyState*/, POINTL pt, DWORD* pdwEffect) override {
         *pdwEffect = DROPEFFECT_COPY;
+        SplitDropSide side = UpdateSplitHint(pt);
+        SplitViewShowDropHint(nullptr, SplitDropSide::None);
 
         // first try file drops (CF_HDROP)
         FORMATETC fmtHDrop = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
@@ -6123,7 +6154,13 @@ class CanvasDropTarget : public IDropTarget {
         if (SUCCEEDED(hr) && medium.hGlobal) {
             HDROP hDrop = (HDROP)medium.hGlobal;
             MainWindow* win = FindMainWindowByHwnd(hwnd);
-            if (win) {
+            if (win && side == SplitDropSide::Right) {
+                StrVec files;
+                GetDropFilesResolved(hDrop, false, files);
+                if (len(files) == 1) {
+                    SplitViewDropFile(win, files[0]);
+                }
+            } else if (win) {
                 OnDropFiles(win, hDrop, false);
             }
             ReleaseStgMedium(&medium);

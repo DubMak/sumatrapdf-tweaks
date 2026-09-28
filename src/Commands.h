@@ -334,8 +334,9 @@ enum {
     CmdSave = 528,
     CmdSplitWithCurrentTab = 529,
     CmdCloseSplitView = 530,
+    CmdToggleSplitView = 531,
 
-    CmdLast = 530,
+    CmdLast = 531,
     CmdFirstCustom = CmdLast + 100,
 
     // aliases, at the end to not mess ordering

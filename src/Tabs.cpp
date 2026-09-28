@@ -432,6 +432,10 @@ static MenuDef menuDefContextTab[] = {
         CmdSplitWithCurrentTab,
     },
     {
+        TrN("Split View"),
+        CmdToggleSplitView,
+    },
+    {
         TrN("Close Split View"),
         CmdCloseSplitView,
     },
@@ -560,6 +564,15 @@ void CloseAllTabs(MainWindow* win) {
     CloseCollectedTabs(win, toClose);
 }
 
+static bool HasOtherDocumentTab(MainWindow* win, WindowTab* tab) {
+    for (WindowTab* t : win->Tabs()) {
+        if (t != tab && !t->IsNonDocumentTab()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // TODO: add "Move to another window" sub-menu
 static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
     MainWindow* win = FindMainWindowByHwnd(tabsCtrl->hwnd);
@@ -635,6 +648,13 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
         if (!canSplit) {
             DeleteMenu(popup, CmdSplitWithCurrentTab, MF_BYCOMMAND);
         }
+
+        // on the current tab: split it with another document tab
+        bool canSplitCur = !win->splitPane && cur == tabUnderMouse && !cur->IsNonDocumentTab() && cur->ctrl &&
+                           HasOtherDocumentTab(win, cur);
+        if (!canSplitCur) {
+            DeleteMenu(popup, CmdToggleSplitView, MF_BYCOMMAND);
+        }
     }
     // the save/discard items only make sense when the document has unsaved
     // changes (e.g. filled form fields, added annotations); otherwise remove
@@ -692,6 +712,10 @@ static void TabsContextMenu(TabsCtrl* tabsCtrl, VirtMouseEvent* ev) {
             SplitViewEnd(win, true, true);
             return;
         }
+        case CmdToggleSplitView: {
+            SplitViewStartDefault(win);
+            return;
+        }
         case CmdProperties: {
             ShowProperties(win->hwndFrame, tabUnderMouse->ctrl);
             return;
@@ -727,12 +751,39 @@ static void MainWindowTabClosed(MainWindow* win, TabsCtrl::ClosedEvent* ev) {
     CloseTab(tab, false);
 }
 
+struct SplitWithTabData {
+    MainWindow* win = nullptr;
+    WindowTab* tab = nullptr;
+};
+
+static void SplitWithTabAsync(SplitWithTabData* d) {
+    if (IsMainWindowValidAndNotClosing(d->win) && d->win->GetTabIdx(d->tab) >= 0) {
+        SplitViewStart(d->win, d->tab);
+    }
+    delete d;
+}
+
+// Ctrl+click on another document tab: show it next to the current one
+static bool CanCtrlClickSplit(MainWindow* win, WindowTab* target) {
+    WindowTab* cur = win->CurrentTab();
+    if (!IsCtrlPressed() || !cur || cur == target || cur->IsNonDocumentTab() || !cur->ctrl) {
+        return false;
+    }
+    return !target->IsNonDocumentTab();
+}
+
 static void MainWindowTabSelectionChanging(MainWindow* win, TabsCtrl::SelectionChangingEvent* ev) {
     // the split-view stand-in tab is never selected: a click focuses the pane
     WindowTab* target = (ev->tabIdx >= 0 && ev->tabIdx < win->TabCount()) ? win->GetTab(ev->tabIdx) : nullptr;
     if (target && target == win->splitPeerTab) {
         ev->preventChanging = true;
         uitask::Post(MkFunc0(SplitViewFocusPane, win), "SplitViewFocusPane");
+        return;
+    }
+    if (target && CanCtrlClickSplit(win, target)) {
+        ev->preventChanging = true;
+        auto* data = new SplitWithTabData{win, target};
+        uitask::Post(MkFunc0<SplitWithTabData>(SplitWithTabAsync, data), "SplitWithTab");
         return;
     }
     // TODO: Should we allow the switch of the tab if we are in process of printing?
@@ -747,8 +798,30 @@ static void MainWindowTabSelectionChanged(MainWindow* win, TabsCtrl::SelectionCh
     LoadModelIntoTab(tab);
 }
 
+// a tab dragged over the document tints the half it would split to
+static void MainWindowTabDragMove(MainWindow* win, TabsCtrl::DragMoveEvent* ev) {
+    static SplitDropSide shown = SplitDropSide::None;
+    SplitDropSide side = SplitDropSide::None;
+    if (!ev->ended) {
+        side = SplitViewTabDropSide(win, win->GetTab(ev->tabIdx), ev->screenPt);
+    }
+    if (side == shown) {
+        return;
+    }
+    shown = side;
+    // the drag image is drawn on the screen: hide it while the tint changes
+    ImageList_DragShowNolock(FALSE);
+    SplitViewShowDropHint(win, side);
+    ImageList_DragShowNolock(TRUE);
+}
+
 static void MainWindowTabMigration(MainWindow* win, TabsCtrl::MigrationEvent* ev) {
     WindowTab* tab = win->GetTab(ev->tabIdx);
+    SplitDropSide side = SplitViewTabDropSide(win, tab, ev->releasePoint);
+    if (side != SplitDropSide::None) {
+        SplitViewDropTab(win, tab, side);
+        return;
+    }
     MainWindow* releaseWnd = nullptr;
     HWND hwnd = HwndWindowFromPoint(ev->releasePoint);
     if (hwnd != nullptr) {
@@ -779,6 +852,7 @@ void CreateTabbar(MainWindow* win) {
     tabsCtrl->onSelectionChanged = MkFunc1(MainWindowTabSelectionChanged, win);
     tabsCtrl->onContextMenu = MkFunc1(TabsContextMenu, tabsCtrl);
     tabsCtrl->onTabMigration = MkFunc1(MainWindowTabMigration, win);
+    tabsCtrl->onTabDragMove = MkFunc1(MainWindowTabDragMove, win);
     tabsCtrl->Create(args);
     win->tabsCtrl = tabsCtrl;
     win->tabSelectionHistory = new Vec<WindowTab*>();
