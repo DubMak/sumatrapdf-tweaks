@@ -68,12 +68,18 @@ file there (one undo step per file).
 
 ### 5. Split view: two documents side by side
 
-Right-click a tab > **Split With Current Tab**. That document opens in a pane next to the current one.
+Ways to open a second document next to the current one:
+
+- **Ctrl+\\** (or **Toggle Split View** in the command palette) toggles split view
+- right-click a tab > **Split With Current Tab**, or the current tab > **Split View**
+- **Ctrl+click** a tab
+- drag a tab onto the left or right half of the document (the drop side is highlighted)
+- drop one PDF from Explorer onto the right third of the document
 
 - each side has its own toolbar, Pages sidebar (on its outer edge), zoom, page and undo
 - a colored line on the toolbar marks the side with keyboard focus; shortcuts such as Ctrl+S act on that side
 - **Ctrl+Tab / Ctrl+Shift+Tab** switch tabs from either side
-- end it with **Close Split View** (tab menu or command palette) or by closing either tab
+- end it with **Ctrl+\\**, **Close Split View** (tab menu or command palette) or by closing either tab
 
 ![Split view](docs/tweaks/split-view.png)
 
