@@ -1,6 +1,6 @@
 # Fork build: 64-bit Release exe, portable (static) exe and installer.
-# Every push to my-tweaks uploads them as a workflow artifact; pushing a tag
-# v* also publishes them as a GitHub release.
+# Every push to my-tweaks publishes them as a GitHub release "build-<N>"
+# (marked Latest); pushing a tag v* publishes a release under that tag.
 name: Tweaks build
 on:
   push:
@@ -60,10 +60,18 @@ jobs:
           path: dist/*.exe
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
           $files = (Get-ChildItem dist\*.exe).FullName
-          gh release create "${{ github.ref_name }}" @files --repo "${{ github.repository }}" --generate-notes
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $tag = "${{ github.ref_name }}"
+            $title = "SumatraPDF Tweaks $tag"
+          } else {
+            # the tag is created on this commit; tags made with GITHUB_TOKEN don't re-trigger workflows
+            $tag = "build-$env:BUILD_VER"
+            $title = "SumatraPDF Tweaks build $env:BUILD_VER"
+          }
+          gh release create $tag @files --repo "${{ github.repository }}" --target "${{ github.sha }}" --title $title --generate-notes --latest

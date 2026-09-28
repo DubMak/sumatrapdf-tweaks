@@ -10,11 +10,11 @@ All changes live on the `my-tweaks` branch. Everything else is upstream SumatraP
 
 ## Download
 
-- **Latest build:** open [Actions](https://github.com/DubMak/sumatrapdf-tweaks/actions/workflows/tweaks-build.yml),
-  click the newest green run and download `SumatraPDF-tweaks-<N>-64` at the bottom (needs a GitHub login). It holds:
-  - `SumatraPDF-tweaks-<N>-64-install.exe`: the installer
-  - `SumatraPDF-tweaks-<N>-64.exe`: portable, runs without installing
-- **Releases:** tagged builds are on the [Releases](https://github.com/DubMak/sumatrapdf-tweaks/releases) page.
+Get the [latest release](https://github.com/DubMak/sumatrapdf-tweaks/releases/latest) (every change is published there
+automatically, no login needed):
+
+- `SumatraPDF-tweaks-<N>-64-install.exe`: the installer
+- `SumatraPDF-tweaks-<N>-64.exe`: portable, runs without installing
 
 64-bit Windows only. Builds are unsigned, so Windows SmartScreen may warn on first run.
 
@@ -137,7 +137,7 @@ TextSnippets [
 
 Same as upstream: see [Developer Information](https://www.sumatrapdfreader.org/docs/Contribute-to-SumatraPDF).
 [`.github/workflows/tweaks-build.yml`](.github/workflows/tweaks-build.yml) builds the 64-bit Release exe and installer on
-every push to `my-tweaks`, and publishes a release for tags `v*`.
+every push to `my-tweaks` and publishes them as release `build-<N>`; tags `v*` get a release under that name.
 
 ---
 
