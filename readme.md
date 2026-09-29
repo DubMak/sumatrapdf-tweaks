@@ -110,6 +110,8 @@ In _Edit PDF_ mode, the arrow keys nudge the selected annotation by a pixel (Shi
 - Free Text is red (`FreeTextColor = #ff0000`) with no border (`FreeTextBorderWidth = 0`).
 - `SignatureImage` is `c:\sig\signature.png`.
 - A fresh install gets one text snippet, **Invoice approvals** (Producer and Accountant approval lines).
+- No Home tab (`NoHomeTab = true`), and Ctrl+Tab switches tabs directly (`CtrlTabSimple = true`).
+- No update checks (`CheckForUpdates = false`): the official updater would replace this fork.
 
 Change any of these in the settings file; an existing settings file keeps its values.
 

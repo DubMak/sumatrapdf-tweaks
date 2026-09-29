@@ -1298,7 +1298,7 @@ const globalPrefs: Field[] = [
       'Light theme; the default #80fff200 is a marker meaning "use the theme\'s color", so setting ' +
       "any other value also colorizes the toolbar and sidebars",
   ),
-  field("NoHomeTab", Bool, false, "if true, doesn't open Home tab"),
+  field("NoHomeTab", Bool, true, "if true, doesn't open Home tab"),
   field(
     "HomePageSortByFrequentlyRead",
     Bool,
@@ -1803,7 +1803,7 @@ const globalPrefs: Field[] = [
   field(
     "CtrlTabSimple",
     Bool,
-    false,
+    true,
     "if true, Ctrl+Tab and Ctrl+Shift+Tab immediately switch to the next / previous tab in tab-strip order " +
       "(the behavior before version 3.6) instead of showing the tab switcher",
   ).ver("3.7"),
@@ -2008,7 +2008,7 @@ const globalPrefs: Field[] = [
   compactStruct("PropWinPos", pointPos, "position of the document properties window").structName("Point"),
   // saved & honored, but hidden from the advanced settings dialog (edited via
   // the "Automatically check for updates" checkbox in Options instead)
-  field("CheckForUpdates", Bool, true, "if true, check once a day whether an update is available").internal(),
+  field("CheckForUpdates", Bool, false, "if true, check once a day whether an update is available").internal(),
   emptyLine(),
   comment("Settings below are not recognized by the current version"),
 ];
