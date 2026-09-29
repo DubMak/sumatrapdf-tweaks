@@ -17101,6 +17101,16 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
         }
     }
 
+    // arrows bump a selected annotation instead of scrolling. Only for the
+    // canvas / frame: the in-place text editor keeps its caret keys
+    if (msg.message == WM_KEYDOWN && !IsCtrlPressed() && !IsAltPressed()) {
+        MainWindow* win = FindMainWindowByHwnd(msg.hwnd);
+        bool isFrameOrCanvas = win && (msg.hwnd == win->hwndFrame || msg.hwnd == win->hwndCanvas);
+        if (isFrameOrCanvas && NudgeSelectedAnnotation(win, msg.wParam)) {
+            return true;
+        }
+    }
+
     // Shift+arrows normally accelerate to scroll. When a PDF text selection is
     // active, skip the accelerator so FrameOnKeydown can extend the selection
     // via TextSelection::ExtendBy (issue #5814).
