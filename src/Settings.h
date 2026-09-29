@@ -1590,11 +1590,11 @@ static const FieldInfo gAnnotationsFields[] = {
     {offsetof(Annotations, underlineColor), SettingType::Color, (intptr_t)"#8bf05d"},
     {offsetof(Annotations, squigglyColor), SettingType::Color, (intptr_t)"#f199d2"},
     {offsetof(Annotations, strikeOutColor), SettingType::Color, (intptr_t)"#e24745"},
-    {offsetof(Annotations, freeTextColor), SettingType::Color, (intptr_t)""},
+    {offsetof(Annotations, freeTextColor), SettingType::Color, (intptr_t)"#ff0000"},
     {offsetof(Annotations, freeTextBackgroundColor), SettingType::Color, (intptr_t)""},
     {offsetof(Annotations, freeTextOpacity), SettingType::Int, 100},
     {offsetof(Annotations, freeTextSize), SettingType::Int, 12},
-    {offsetof(Annotations, freeTextBorderWidth), SettingType::Int, 1},
+    {offsetof(Annotations, freeTextBorderWidth), SettingType::Int, 0},
     {offsetof(Annotations, freeTextAlignment), SettingType::String, (intptr_t)"left"},
     {offsetof(Annotations, presetColors), SettingType::String,
      (intptr_t)"#ffff00 #8bf05d #99defa #f199d2 #e24745 #ff0000 #0000ff #000000"},
@@ -1613,7 +1613,7 @@ static const FieldInfo gAnnotationsFields[] = {
     {offsetof(Annotations, fileAttachmentColor), SettingType::Color, (intptr_t)""},
     {offsetof(Annotations, textIconType), SettingType::String, (intptr_t)""},
     {offsetof(Annotations, defaultAuthor), SettingType::String, (intptr_t)""},
-    {offsetof(Annotations, signatureImage), SettingType::String, (intptr_t)""},
+    {offsetof(Annotations, signatureImage), SettingType::String, (intptr_t)"c:\\sig\\signature.png"},
 };
 static const StructInfo gAnnotationsInfo = {
     sizeof(Annotations),

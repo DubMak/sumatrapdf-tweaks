@@ -283,6 +283,18 @@ static void CreateSelectionHandlerCommands() {
     }
 }
 
+// only on first run, so removing it from the settings file sticks
+static void AddDefaultTextSnippets() {
+    if (len(*gSettings->textSnippets) > 0) {
+        return;
+    }
+    TextSnippet* ts = new TextSnippet();
+    ts->name = str::Dup(StrL("Invoice approvals"));
+    ts->text = str::Dup(StrL("Producer Approval______________\\n\\n\\n\\n\\nAccountant Approval_____________"));
+    ts->key = {};
+    VecAppend(*gSettings->textSnippets, ts);
+}
+
 static void CreateTextSnippetCommands() {
     for (TextSnippet* ts : *gSettings->textSnippets) {
         if (!ts || str::IsEmptyOrWhiteSpace(ts->name) || str::IsEmptyOrWhiteSpace(ts->text)) {
@@ -897,6 +909,9 @@ bool LoadSettings() {
     CreateThemeCommands();
     CreateExternalViewersCommands();
     CreateSelectionHandlerCommands();
+    if (!file::Exists(settingsPath)) {
+        AddDefaultTextSnippets();
+    }
     CreateTextSnippetCommands();
     CreateCustomShortcuts();
 

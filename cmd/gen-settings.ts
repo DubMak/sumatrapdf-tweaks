@@ -848,7 +848,7 @@ const annotations: Field[] = [
     rgb(0xe2, 0x47, 0x45),
     "color of newly created strike out annotations. #aarrggbb sets default opacity " + "the same way as HighlightColor",
   ).ver("3.5"),
-  field("FreeTextColor", Color, "", "text color of newly created free text annotations").ver("3.5"),
+  field("FreeTextColor", Color, "#ff0000", "text color of newly created free text annotations").ver("3.5"),
   field("FreeTextBackgroundColor", Color, "", "background color of newly created free text annotations").ver("3.6"),
   field(
     "FreeTextOpacity",
@@ -859,7 +859,7 @@ const annotations: Field[] = [
   // sizes are in PDF user space units (points), not screen pixels: they're
   // part of the document, so they must not be DPI-scaled
   field("FreeTextSize", Int, 12, "font size of free text annotations, in points").ver("3.5"),
-  field("FreeTextBorderWidth", Int, 1, "border width of free text annotations, in points").ver("3.5"),
+  field("FreeTextBorderWidth", Int, 0, "border width of free text annotations, in points").ver("3.5"),
   field(
     "FreeTextAlignment",
     Str,
@@ -956,7 +956,7 @@ const annotations: Field[] = [
   field(
     "SignatureImage",
     Str,
-    "",
+    "c:\\sig\\signature.png",
     "path of the image (e.g. a transparent .png) that Sign With Image stamps on the page. " +
       "If not set, or the file is missing, a file picker is shown",
   ),
@@ -2211,7 +2211,7 @@ function cdefault(f: Field, built: Record<string, number>): string {
     if (f.Default === null || f.Default === undefined) {
       return "0";
     }
-    return `(intptr_t)"${f.Default}"`;
+    return `(intptr_t)"${escapeCStr(f.Default)}"`;
   }
   const typeName = f.Type.name;
   if (["Struct", "StructPtr", "Array", "Compact"].includes(typeName)) {

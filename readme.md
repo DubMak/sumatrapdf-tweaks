@@ -103,6 +103,16 @@ Right-click a page:
 
 ![Context menu with text snippets](docs/tweaks/context-menu.png)
 
+In _Edit PDF_ mode, the arrow keys nudge the selected annotation by a pixel (Shift+arrow: 10 pixels).
+
+## Different defaults
+
+- Free Text is red (`FreeTextColor = #ff0000`) with no border (`FreeTextBorderWidth = 0`).
+- `SignatureImage` is `c:\sig\signature.png`.
+- A fresh install gets one text snippet, **Invoice approvals** (Producer and Accountant approval lines).
+
+Change any of these in the settings file; an existing settings file keeps its values.
+
 ## New settings
 
 Add these in _Settings > Advanced Options_ (`SumatraPDF-settings.txt`):
