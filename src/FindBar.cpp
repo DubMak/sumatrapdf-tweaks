@@ -711,6 +711,11 @@ static void PositionFindBar(FindBarWnd* bar) {
     // which pushed the bar a few pixels too far right (#5762).
     Rect frClient = HwndMapLtrClientRectToScreen(win->hwndFrame, HwndClientRect(win->hwndFrame));
     int cx = frClient.x + frClient.dx - bar->barDx;
+    // split view: stay over the left document, not the pane next to it
+    if (win->splitPane && HwndIsVisible(win->splitPane->hwndFrame)) {
+        Rect canvas = HwndWindowRect(win->hwndCanvas);
+        cx = canvas.x + canvas.dx - bar->barDx;
+    }
     int cy;
     if (btn.IsEmpty()) {
         cy = fr.y + bar->barDy;
