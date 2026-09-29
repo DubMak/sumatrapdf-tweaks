@@ -3011,6 +3011,7 @@ void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword) {
         return;
     }
     logf("ReloadDocument: %s, auto refresh: %d\n", path, (int)autoRefresh);
+    auto timeStart = TimeGet();
 
     // Save display state before potentially destroying the old controller
     FileState* fs = NewFileState(path);
@@ -3091,6 +3092,8 @@ void ReloadDocument(MainWindow* win, bool autoRefresh, bool canAskForPassword) {
         }
     }
 
+    // reopening reads the file again: slow on a network / cloud drive
+    logf("ReloadDocument: %s reloaded in %.1f ms\n", path, TimeSinceInMs(timeStart));
     DeleteFileState(fs);
 }
 
