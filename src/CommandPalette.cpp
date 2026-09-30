@@ -45,6 +45,7 @@
 #include "Notifications.h"
 #include "PdfDarkMode.h"
 #include "EngineAll.h"
+#include "PdfTools.h"
 #include "CommandAvailability.h"
 #include "Accelerators.h"
 #include "FilterHighlightDraw.h"
@@ -402,6 +403,8 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     void UpdateDrop(Point pt);
     void EndPageDrag();
     void SelectPages(int firstPage, int n);
+    void SelectedPages(Vec<int>& pages) const;
+    bool HandleSidebarKey(int vkey);
 
   private:
     bool IsPageSelected(int pageNo) const;
@@ -415,6 +418,8 @@ struct ThumbnailPaletteCtrl : VirtListBox {
     bool GridOrigin(int& left, int& top0);
     Rect PageRectInWindow(int pageNo, int left, int top0);
     void OnThumbCaptureLost();
+    void OnThumbContextMenu(VirtMouseEvent*);
+    void DragPagesOut();
     void InitForCurrentTab();
     void FreeCache();
     void SetThumbSize(int dx);
@@ -676,6 +681,10 @@ ThumbnailPaletteCtrl::ThumbnailPaletteCtrl(MainWindow* win, PlatformFont* font, 
     VirtCtrl::onDoubleClick =
         MkMethod1<ThumbnailPaletteCtrl, VirtMouseEvent*, &ThumbnailPaletteCtrl::OnThumbDoubleClick>(this);
     onCaptureLost = MkMethod0<ThumbnailPaletteCtrl, &ThumbnailPaletteCtrl::OnThumbCaptureLost>(this);
+    if (sidebarMode) {
+        VirtCtrl::onContextMenu =
+            MkMethod1<ThumbnailPaletteCtrl, VirtMouseEvent*, &ThumbnailPaletteCtrl::OnThumbContextMenu>(this);
+    }
 }
 
 void ThumbnailPaletteCtrl::InitForCurrentTab() {
@@ -1004,9 +1013,16 @@ void ThumbnailPaletteCtrl::OpenSelectedPage() {
     }
 }
 
+static bool IsOutsideOurWindows(HWND hwnd);
+
 void ThumbnailPaletteCtrl::OnThumbMouseDown(VirtMouseEvent* ev) {
     int pageNo = PageAtPoint(ev->pt);
     if (pageNo > 0) {
+        if (sidebarMode && GetHwnd()) {
+            // the keyboard follows: Delete deletes the selected pages, other
+            // keys go on to the document (see WndProcTocBox)
+            HwndSetFocus(GetHwnd());
+        }
         bool leftButton = sidebarMode && ev->button == 0;
         bool pick = leftButton && (ev->isCtrl || ev->isShift);
         bool inSelection = leftButton && !pick && len(selPages) > 0 && VecContains(selPages, pageNo);
@@ -1064,6 +1080,11 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
             dragging = true;
             StartDragTimer();
         }
+        if (IsOutsideOurWindows(GetHwnd())) {
+            DragPagesOut();
+            ev->didHandle = true;
+            return;
+        }
         TrackPageDrag(ev->ptWindow);
         ev->didHandle = true;
         return;
@@ -1081,6 +1102,137 @@ void ThumbnailPaletteCtrl::OnThumbMouseMove(VirtMouseEvent* ev) {
         SelectPage(pageNo);
         ev->didHandle = true;
     }
+}
+
+// the mouse is over a window of another app, e.g. Explorer or the desktop
+static bool IsOutsideOurWindows(HWND hwnd) {
+    POINT pt;
+    if (!hwnd || !GetCursorPos(&pt)) {
+        return false;
+    }
+    HWND at = WindowFromPoint(pt);
+    if (!at) {
+        return false;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(at, &pid);
+    return pid != GetCurrentProcessId();
+}
+
+// the pages to act on: the multi-selection, or else the selected page
+void ThumbnailPaletteCtrl::SelectedPages(Vec<int>& pages) const {
+    VecClear(pages);
+    if (len(selPages) > 0) {
+        VecAppendVec(pages, selPages);
+    } else if (selectedPage >= 1 && selectedPage <= pageCount) {
+        VecAppend(pages, selectedPage);
+    }
+}
+
+// the dragged pages left our windows: hand them to Windows' drag and drop as a
+// PDF file, so Explorer (or anything that takes files) can save them
+void ThumbnailPaletteCtrl::DragPagesOut() {
+    Vec<int> pages;
+    VecAppendVec(pages, dragPages);
+    int thumbPage = pressPage;
+    EndPageDrag();
+    if (root) {
+        root->ReleaseCapture();
+    }
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    if (!dm || len(pages) == 0) {
+        return;
+    }
+    TempStr tmpPath = GetTempFilePathTemp(StrL("SumPgDrag"));
+    if (len(tmpPath) == 0) {
+        return;
+    }
+    HGLOBAL data = nullptr;
+    {
+        HCURSOR prevCursor = SetCursor(LoadCursor(nullptr, IDC_WAIT));
+        if (SavePdfPagesToFile(dm->GetEngine(), pages, tmpPath)) {
+            Str content = file::ReadFile(tmpPath);
+            if (len(content) > 0) {
+                data = GlobalAlloc(GMEM_MOVEABLE, (size_t)len(content));
+                void* dst = data ? GlobalLock(data) : nullptr;
+                if (dst) {
+                    memcpy(dst, content.s, (size_t)len(content));
+                    GlobalUnlock(data);
+                }
+            }
+            str::Free(content);
+        }
+        file::Delete(tmpPath);
+        SetCursor(prevCursor);
+    }
+    if (!data) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Couldn't save the pages"), kNotif5SecsTimeOut);
+        return;
+    }
+    Pixmap* thumb =
+        thumbPage > 0 && thumbPage <= len(cache->thumbnails) ? ThumbnailToDraw(cache, thumbPage - 1) : nullptr;
+    DragOutVirtualFile(PagesFileNameTemp(tab, pages), data, thumb);
+}
+
+// right-click a page: save or delete it, or the selection it's part of
+void ThumbnailPaletteCtrl::OnThumbContextMenu(VirtMouseEvent* ev) {
+    int pageNo = PageAtPoint(ev->pt);
+    if (pageNo <= 0 || !tab || !CanInsertPagesInTab(tab)) {
+        return;
+    }
+    ev->didHandle = true;
+    if (!IsPageSelected(pageNo)) {
+        ClearMultiSelection();
+        SelectPage(pageNo);
+        OpenSelectedPage();
+    }
+    Vec<int> pages;
+    SelectedPages(pages);
+    int k = len(pages);
+    if (k == 0) {
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    constexpr UINT kSaveAs = 1;
+    constexpr UINT kDelete = 2;
+    TempStr saveText = k == 1 ? str::DupTemp(Tr("Save Page As...")) : fmt(Tr("Save %d Pages As...").s, k);
+    TempStr delText = k == 1 ? str::DupTemp(Tr("Delete Page\tDel")) : fmt(Tr("Delete %d Pages\tDel").s, k);
+    AppendMenuW(menu, MF_STRING, kSaveAs, CWStrTemp(saveText));
+    UINT delFlags = MF_STRING | (k >= pageCount ? MF_GRAYED : 0);
+    AppendMenuW(menu, delFlags, kDelete, CWStrTemp(delText));
+    HWND hwnd = GetHwnd();
+    POINT pt{ev->ptWindow.x, ev->ptWindow.y};
+    ClientToScreen(hwnd, &pt);
+    UINT cmd = (UINT)TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+    DestroyMenu(menu);
+    // the menu pumps messages: the document may have changed
+    if (win->CurrentTab() != tab) {
+        return;
+    }
+    if (cmd == kSaveAs) {
+        SavePagesOfTabAs(tab, pages);
+    } else if (cmd == kDelete) {
+        DeletePagesInTab(tab, pages);
+    }
+}
+
+// sidebar keys while the thumbnails have the focus; false: not ours
+bool ThumbnailPaletteCtrl::HandleSidebarKey(int vkey) {
+    bool mods = IsCtrlPressed() || IsShiftPressed() || IsAltPressed();
+    if (vkey == VK_ESCAPE && (dragging || pressPage > 0)) {
+        EndPageDrag();
+        if (root) {
+            root->ReleaseCapture();
+        }
+        return true;
+    }
+    if (vkey != VK_DELETE || mods || pressPage > 0 || !tab || !CanInsertPagesInTab(tab)) {
+        return false;
+    }
+    Vec<int> pages;
+    SelectedPages(pages);
+    DeletePagesInTab(tab, pages);
+    return true;
 }
 
 void ThumbnailPaletteCtrl::OnThumbMouseUp(VirtMouseEvent* ev) {
@@ -3805,6 +3957,11 @@ void SidebarThumbnailsUpdate(VirtListBox* lb, bool active, int pageNo) {
 }
 
 // the pages were reordered (perm[newIdx] = oldIdx); pageNo gets highlighted
+bool SidebarThumbnailsHandleKey(VirtListBox* lb, int vkey) {
+    auto* ctrl = (ThumbnailPaletteCtrl*)lb;
+    return ctrl && ctrl->cache && ctrl->HandleSidebarKey(vkey);
+}
+
 void SidebarThumbnailsReorder(VirtListBox* lb, const Vec<int>& perm, int pageNo) {
     auto* ctrl = (ThumbnailPaletteCtrl*)lb;
     if (!ctrl || !ctrl->cache) {

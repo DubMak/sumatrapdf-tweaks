@@ -2,6 +2,7 @@
    License: GPLv3 */
 
 struct MainWindow;
+class EngineBase;
 
 void ShowPdfBakeDialog(MainWindow* win);
 void ShowPdfExtractTextDialog(MainWindow* win);
@@ -21,3 +22,4 @@ TempStr ConvertPagesToImagesResultTemp(Str templatePath, Str pagesSpec, int* exi
 void ShowSaveSelectionAsImageDialog(MainWindow* win);
 TempStr SaveSelectionAsImageResultTemp(Str destPath, int dpi, int pageNo, int x, int y, int dx, int dy,
                                        int* exitCodeOut);
+bool SavePdfPagesToFile(EngineBase* engine, const Vec<int>& pages, Str destPath);

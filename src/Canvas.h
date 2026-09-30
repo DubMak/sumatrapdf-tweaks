@@ -31,6 +31,8 @@ void RegisterCanvasDropTarget(HWND hwndCanvas);
 void RevokeCanvasDropTarget(HWND hwndCanvas);
 void FillCanvasThemeBackground(HWND hwndCanvas);
 void DisconnectLastDragDataObject();
+struct Pixmap;
+bool DragOutVirtualFile(Str fileName, HGLOBAL data, Pixmap* thumb);
 
 // Timer for mouse wheel smooth scrolling
 constexpr UINT_PTR kSmoothScrollTimerID = 6;

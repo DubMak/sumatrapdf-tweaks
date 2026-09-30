@@ -12623,6 +12623,102 @@ void InsertPagesFromTab(WindowTab* dst, WindowTab* src, const Vec<int>& pages, i
     ApplyPageReorder(dst, toSlot);
 }
 
+// delete pages (ascending); at least one page must stay. One undo step
+void DeletePagesInTab(WindowTab* tab, const Vec<int>& pages) {
+    if (!CanInsertPagesInTab(tab) || len(pages) == 0) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    DisplayModel* dm = tab->AsFixed();
+    EngineBase* engine = dm->GetEngine();
+    if (len(pages) >= engine->PageCount()) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Can't delete every page"), kNotif5SecsTimeOut);
+        return;
+    }
+    CancelAnnotationPlacement(win);
+    CancelDrag(win);
+    SetSelectedAnnotation(tab, nullptr);
+    if (gRenderCache) {
+        gRenderCache->AbortRendering(dm);
+    }
+    Vec<Annotation*> removed;
+    if (!EngineMupdfDeletePages(engine, pages, removed)) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Couldn't delete the page"), kNotif5SecsTimeOut);
+        return;
+    }
+    for (Annotation* a : removed) {
+        DetachAnnotationFromUI(a);
+        DeleteAnnotation(a);
+    }
+    EngineMupdfRefreshModifiedState(engine);
+    // the page after the first deleted one moves into its place
+    ApplyPageReorder(tab, std::min(pages[0], engine->PageCount()));
+    TempStr msg = len(pages) == 1 ? str::DupTemp(Tr("Deleted 1 page. Ctrl+Z to undo"))
+                                  : fmt(Tr("Deleted %d pages. Ctrl+Z to undo").s, len(pages));
+    ShowTemporaryNotification(win->hwndCanvas, msg);
+}
+
+// "report - page 3.pdf", "report - pages 3-5.pdf"
+TempStr PagesFileNameTemp(WindowTab* tab, const Vec<int>& pages) {
+    TempStr base = tab && len(tab->filePath) > 0 ? path::GetPathNoExtTemp(path::GetBaseNameTemp(tab->filePath))
+                                                 : str::DupTemp(StrL("pages"));
+    int k = len(pages);
+    if (k == 1) {
+        return fmt("%s - page %d.pdf", base, pages[0]);
+    }
+    if (pages[k - 1] - pages[0] == k - 1) {
+        return fmt("%s - pages %d-%d.pdf", base, pages[0], pages[k - 1]);
+    }
+    return fmt("%s - %d pages.pdf", base, k);
+}
+
+// ask where to save pages (ascending) as a new PDF
+void SavePagesOfTabAs(WindowTab* tab, const Vec<int>& pages) {
+    DisplayModel* dm = tab ? tab->AsFixed() : nullptr;
+    if (!dm || !tab->win || len(pages) == 0 || !EngineMupdfCanEditPages(dm->GetEngine())) {
+        return;
+    }
+    MainWindow* win = tab->win;
+    EngineBase* engine = dm->GetEngine();
+    WCHAR dstFileName[MAX_PATH + 1]{};
+    wstr::BufSet(WStr(dstFileName, dimof(dstFileName)), ToWStrTemp(PagesFileNameTemp(tab, pages)));
+    TempStr dir = path::GetDirTemp(tab->filePath);
+    str::Builder filter;
+    filter.Append(Tr("PDF documents"));
+    filter.Append(StrL("\1*.pdf\1\1"));
+    TempStr filterStr = ToStrTemp(filter);
+    str::TransCharsInPlace(filterStr, StrL("\1"), StrL("\0"));
+
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = win->hwndFrame;
+    ofn.lpstrFile = dstFileName;
+    ofn.nMaxFile = dimof(dstFileName);
+    ofn.lpstrFilter = CWStrTemp(filterStr);
+    ofn.nFilterIndex = 1;
+    ofn.lpstrInitialDir = CWStrTemp(dir);
+    ofn.lpstrDefExt = L"pdf";
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetSaveFileNameW(&ofn)) {
+        return;
+    }
+    // the dialog pumps messages: the tab may be gone or changed
+    if (!IsMainWindowValidAndNotClosing(win) || win->CurrentTab() != tab || tab->AsFixed() != dm ||
+        dm->GetEngine() != engine) {
+        return;
+    }
+    TempStr dstPath = ToUtf8Temp(dstFileName);
+    if (str::EqI(dstPath, tab->filePath)) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Pick another name: that's the open document"), kNotif5SecsTimeOut);
+        return;
+    }
+    if (!SavePdfPagesToFile(engine, pages, dstPath)) {
+        ShowWarningNotification(win->hwndCanvas, Tr("Couldn't save the pages"), kNotif5SecsTimeOut);
+        return;
+    }
+    ShowTemporaryNotification(win->hwndCanvas, fmt(Tr("Saved %s").s, path::GetBaseNameTemp(dstPath)));
+}
+
 static void UndoRedoInTab(WindowTab* tab, bool redo) {
     if (!tab) {
         return;

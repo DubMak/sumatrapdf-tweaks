@@ -614,6 +614,7 @@ class ImageDataObject : public IDataObject {
     UINT cfFileDescriptor = 0;
     UINT cfFileContents = 0;
     UINT cfPreferredDropEffect = 0;
+    WCHAR fileName[MAX_PATH]{};
     FORMATETC fmts[3]{};
     ULONG fmtCount = 0;
 
@@ -634,8 +635,10 @@ class ImageDataObject : public IDataObject {
     }
 
   public:
-    explicit ImageDataObject(HGLOBAL hPng) {
+    // takes ownership of hPng; the drop target sees a file named name
+    explicit ImageDataObject(HGLOBAL hPng, const WCHAR* name = L"image.png") {
         hPngData = hPng;
+        wstr::BufSet(WStr(fileName, dimof(fileName)), WStr(name));
         pngSize = GlobalSize(hPng);
         cfFileDescriptor = RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW);
         cfFileContents = RegisterClipboardFormatW(CFSTR_FILECONTENTS);
@@ -675,7 +678,7 @@ class ImageDataObject : public IDataObject {
             return E_UNEXPECTED;
         }
 
-        // CFSTR_FILEDESCRIPTORW: describe one virtual file "image.png"
+        // CFSTR_FILEDESCRIPTORW: describe one virtual file named fileName
         if (pFE->cfFormat == cfFileDescriptor && (pFE->tymed & TYMED_HGLOBAL)) {
             size_t cb = offsetof(FILEGROUPDESCRIPTORW, fgd) + sizeof(FILEDESCRIPTORW);
             HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, cb);
@@ -692,7 +695,7 @@ class ImageDataObject : public IDataObject {
             fgd->fgd[0].dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
             fgd->fgd[0].nFileSizeLow = (DWORD)pngSize;
             fgd->fgd[0].nFileSizeHigh = 0;
-            wstr::BufSet(WStr(fgd->fgd[0].cFileName, MAX_PATH), WStrL(L"image.png"));
+            wstr::BufSet(WStr(fgd->fgd[0].cFileName, MAX_PATH), WStr(fileName));
             GlobalUnlock(h);
             pMedium->tymed = TYMED_HGLOBAL;
             pMedium->hGlobal = h;
@@ -977,6 +980,55 @@ static void StartImageDragDrop(MainWindow* win) {
         plainSrc->Release();
     }
     FinishDragDrop(dataObj);
+}
+
+// Drag a file that exists only in memory (data, taken over) out of the app, e.g.
+// to Explorer, which saves it under fileName. thumb (optional, not taken over) is
+// shown under the cursor. Returns true if it was dropped somewhere
+bool DragOutVirtualFile(Str fileName, HGLOBAL data, Pixmap* thumb) {
+    if (!data) {
+        return false;
+    }
+    ImageDataObject* dataObj = new ImageDataObject(data, CWStrTemp(fileName));
+
+    HIMAGELIST himl = nullptr;
+    POINT hot{0, 0};
+    if (thumb && thumb->width > 0 && thumb->height > 0) {
+        Pixmap* dib = AllocPixmapDIB(thumb->width, thumb->height);
+        HDC dc = dib ? CreateCompatibleDC(nullptr) : nullptr;
+        if (dc) {
+            HGDIOBJ prev = SelectObject(dc, dib->hbmp);
+            BlitPixmap(thumb, dc, Rect(0, 0, thumb->width, thumb->height));
+            GdiFlush();
+            SelectObject(dc, prev);
+            DeleteDC(dc);
+            HBITMAP dragBmp = CreateProportionalDragThumbnail(dib->hbmp, DpiScale(kDragImageThumbnailSize / 2));
+            if (dragBmp) {
+                BITMAP bm{};
+                GetObject(dragBmp, sizeof(bm), &bm);
+                hot = {bm.bmWidth / 2, bm.bmHeight / 2};
+                himl = CreateDragImageList(dragBmp); // takes ownership of dragBmp
+            }
+        }
+        FreePixmap(dib);
+    }
+
+    ImageDropSource* dropSrc = himl ? new ImageDropSource(himl) : nullptr;
+    TextDropSource* plainSrc = dropSrc ? nullptr : new TextDropSource();
+    IDropSource* src = dropSrc ? (IDropSource*)dropSrc : (IDropSource*)plainSrc;
+    if (dropSrc) {
+        dropSrc->BeginImageListDrag(hot.x, hot.y);
+    }
+    DWORD dwEffect = 0;
+    HRESULT hr = DoDragDrop(dataObj, src, DROPEFFECT_COPY, &dwEffect);
+    if (dropSrc) {
+        dropSrc->EndImageListDrag();
+        dropSrc->Release();
+    } else {
+        plainSrc->Release();
+    }
+    FinishDragDrop(dataObj);
+    return hr == DRAGDROP_S_DROP && dwEffect != DROPEFFECT_NONE;
 }
 
 // Resize handle positions that used in resizing annotations

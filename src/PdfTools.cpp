@@ -1233,6 +1233,40 @@ TempStr ConvertImageCollectionToPdfResultTemp(Str srcPath, Str destPath, int* ex
     return finish(0, str::DupTemp(StrL("OK")));
 }
 
+// Write pages (1-based, ascending) of the document as it is now, unsaved edits and
+// page order included, to a new PDF at destPath
+bool SavePdfPagesToFile(EngineBase* engine, const Vec<int>& pages, Str destPath) {
+    if (!engine || len(pages) == 0 || len(destPath) == 0) {
+        return false;
+    }
+    // the file on disk may have another page order: always start from a snapshot
+    TempStr tmpPath = GetTempFilePathTemp(StrL("SumPgOut"));
+    if (len(tmpPath) == 0) {
+        return false;
+    }
+    // pdfclean only takes an output path that contains ".pdf" (otherwise it reads
+    // it as the page range), so write to our own .pdf and move it into place
+    TempStr outPath = str::JoinTemp(tmpPath, StrL(".pdf"));
+    bool ok = false;
+    if (EngineMupdfSaveCopy(engine, tmpPath)) {
+        TempStr pageRange = FormatPageRangeTemp(pages);
+        char* argv[] = {(char*)"clean",    (char*)"-gggg",    (char*)"-e",        (char*)"100",
+                        (char*)"-f",       (char*)"-i",       (char*)"-t",        (char*)"-Z",
+                        CStrTemp(tmpPath), CStrTemp(outPath), CStrTemp(pageRange)};
+        fz_set_optind(0);
+        ok = pdfclean_main(11, argv) == 0;
+        if (ok) {
+            ok = file::RenameReplace(destPath, outPath) || file::Copy(destPath, outPath, false);
+        }
+    }
+    file::Delete(outPath);
+    file::Delete(tmpPath);
+    if (!ok) {
+        logf("SavePdfPagesToFile: failed to write '%s'\n", destPath);
+    }
+    return ok;
+}
+
 TempStr ExtractPdfPagesResultTemp(Str destPath, Str pagesSpec, int annotsOnly, int* exitCodeOut) {
     auto finish = [&](int code, TempStr s) -> TempStr {
         if (exitCodeOut) {

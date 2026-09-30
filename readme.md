@@ -91,7 +91,20 @@ pages come along. One undo step removes them.
 
 Combined with Ctrl+S this merges and splits PDFs without another tool.
 
-### 7. Annotation shortcuts
+### 7. Delete and export pages
+
+- **Delete**: click a thumbnail (or select several), press **Delete** (or right-click > **Delete Page**). Ctrl+Z brings the pages back; Ctrl+S saves the
+  change. The last page can't be deleted.
+- **Save pages to a new PDF**: right-click a thumbnail > **Save Page As...** (or **Save N Pages As...** for a
+  selection) and pick a name.
+- **Drag to Explorer**: drag thumbnails out of the window onto a folder or the desktop. The pages are saved there as a
+  new PDF named like `report - pages 3-5.pdf`; rename it in Explorer if you like. (Explorer doesn't tell the app which
+  folder it was dropped on, so a drop can't open a Save As dialog; use the right-click command to choose the name
+  first.)
+
+Exports include unsaved edits (reordering, annotations); the open document isn't changed.
+
+### 8. Annotation shortcuts
 
 Right-click a page:
 

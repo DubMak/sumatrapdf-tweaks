@@ -10162,6 +10162,64 @@ bool EngineMupdfMovePages(EngineBase* engine, const Vec<int>& pages, int toSlot)
     return true;
 }
 
+// Delete pages (1-based, ascending, no duplicates); at least one page must stay.
+// One undo step. The annotations of deleted pages are handed back in removedOut,
+// detached from the document; the caller takes them out of the UI and deletes them.
+bool EngineMupdfDeletePages(EngineBase* engine, const Vec<int>& pages, Vec<Annotation*>& removedOut) {
+    VecReset(removedOut);
+    if (!EngineMupdfCanEditPages(engine)) {
+        return false;
+    }
+    EngineMupdf* e = AsEngineMupdf(engine);
+    int n = e->PageCount();
+    int k = len(pages);
+    if (k < 1 || k >= n) {
+        return false;
+    }
+    for (int i = 0; i < k; i++) {
+        if (pages[i] < 1 || pages[i] > n || (i > 0 && pages[i] <= pages[i - 1])) {
+            return false;
+        }
+    }
+    auto* ctx = e->Ctx();
+    AutoUnlockRecursiveMutex pagesScope(&e->pagesLock);
+    AutoUnlockMutex renderScope(&e->renderLock);
+    bool ok = false;
+    {
+        AutoUnlockRecursiveMutex docScope(&e->docLock);
+        if (len(e->pageObjNums) == 0 && !ReadPageObjNums(e, e->pageObjNums)) {
+            return false;
+        }
+        pdf_document* doc = e->pdfdoc;
+        fz_var(ok);
+        fz_try(ctx) {
+            pdf_begin_operation(ctx, doc, k == 1 ? "Delete page" : "Delete pages");
+            fz_try(ctx) {
+                // from the back so earlier indexes stay valid
+                for (int i = k - 1; i >= 0; i--) {
+                    pdf_delete_page(ctx, doc, pages[i] - 1);
+                }
+                pdf_end_operation(ctx, doc);
+                ok = true;
+            }
+            fz_catch(ctx) {
+                pdf_abandon_operation(ctx, doc);
+                fz_rethrow(ctx);
+            }
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            logf("EngineMupdfDeletePages: deleting %d pages from %d failed\n", k, pages[0]);
+        }
+    }
+    if (!ok) {
+        return false;
+    }
+    e->modifiedAnnotations = true;
+    SyncPageOrder(e, &removedOut);
+    return true;
+}
+
 // Insert the pages srcPages (1-based, in that order; nullptr: all) of the PDF at
 // path in front of the page now at toSlot (pageCount + 1 appends). One undo step. Annotations and form fields of the
 // inserted pages are flattened into their content. Returns the number of pages inserted, 0 on failure.

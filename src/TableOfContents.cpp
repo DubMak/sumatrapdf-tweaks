@@ -1765,6 +1765,18 @@ static LRESULT CALLBACK WndProcTocBox(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
         return res;
     }
 
+    // a click on the thumbnails gives this window the focus: Delete (and Esc
+    // during a drag) is theirs, every other key goes to the frame as if the
+    // document had the focus
+    bool thumbsShown = win->tocThumbnails && win->tocThumbnails->IsVisible();
+    if (thumbsShown && (msg == WM_KEYDOWN || msg == WM_CHAR) && GetFocus() == hwnd) {
+        if (msg == WM_KEYDOWN && SidebarThumbnailsHandleKey(win->tocThumbnails, (int)wp)) {
+            return 0;
+        }
+        SendMessageW(win->hwndFrame, msg, wp, lp);
+        return 0;
+    }
+
     // the panel header (label + close button) is a virtual control tree, so
     // this window paints it and hands it its input
     if (VirtHostOnMessage(hwnd, win->tocRoot, msg, wp, lp, res, ThemeControlBackgroundColor())) {

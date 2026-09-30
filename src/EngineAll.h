@@ -125,6 +125,7 @@ bool EngineMupdfCanEditPages(EngineBase*);
 bool EngineMupdfCanMovePages(EngineBase*);
 int EngineMupdfInsertPdf(EngineBase*, const char* path, int toSlot, const Vec<int>* srcPages = nullptr);
 bool EngineMupdfMovePages(EngineBase*, const Vec<int>& pages, int toSlot);
+bool EngineMupdfDeletePages(EngineBase*, const Vec<int>& pages, Vec<Annotation*>& removedOut);
 bool EngineMupdfTakePagePerm(EngineBase*, Vec<int>& permOut);
 
 bool EngineMupdfSupportsAnnotations(EngineBase*);
